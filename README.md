@@ -243,8 +243,10 @@ A pre-commit hook validates build, formatting, static analysis, tests, coverage,
 | JWT Server | `_examples/jwt_server` | net/http JWT middleware |
 | API Key Middleware | `_examples/apikey_middleware` | API key validation |
 | Combined | `_examples/combined` | Multiple auth methods together |
-| Gin JWT Server | `_examples/gin_jwt_server` | Gin framework with JWT validation |
-| Gin mTLS Server | `_examples/gin_mtls_server` | Gin framework with mTLS verification |
+| Gin JWT Server | `_examples/gin_jwt_server` | Gin with JWT validation |
+| Gin mTLS Server | `_examples/gin_mtls_server` | Gin with mTLS client cert verification |
+| Gin API Key Server | `_examples/gin_apikey_server` | Gin with API key auth and scope checks |
+| Gin OAuth2 Gateway | `_examples/gin_oauth2_client` | Gin with inbound JWT + outbound OAuth2 |
 
 ## Documentation
 

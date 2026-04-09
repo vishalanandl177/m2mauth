@@ -601,36 +601,33 @@ m2mauth (core interfaces, zero deps)
 
 ## Benchmarks
 
-### Component-level benchmarks
+Measured on Intel Xeon @ 2.10GHz, 4 cores, Go 1.24.7.
+
+### Component-level
 
 | Benchmark | Latency | Allocs | Bytes/op |
 |-----------|---------|--------|----------|
-| Transport creation | ~16.6 us | 13 | 18,369 B |
-| Transport creation + rotation | ~16.6 us | 13 | 18,369 B |
-| Verifier creation | ~44 ns | 2 | 160 B |
-| Verifier.Validate (single) | ~42.9 us | 4 | 22,464 B |
-| Verifier.Validate (parallel) | ~23.4 us | 5 | 37,777 B |
-| CertInfo (single) | ~3.0 us | 7 | 34,688 B |
-| CertInfo (parallel) | ~2.4 us | 7 | 34,688 B |
-
-### End-to-end (full loopback mTLS request)
-
-| Benchmark | Latency | Allocs | Bytes/op |
-|-----------|---------|--------|----------|
-| GET -- new TLS conn each | ~786 us | 1,626 | 176 KB |
-| GET -- reused conn | ~65.4 us | 12 | 39.4 KB |
-| POST -- reused conn | ~79.8 us | 164 | 12.4 KB |
-| GET -- parallel, reused | ~34.3 us | 12 | 39.4 KB |
-| TLS handshake only | ~487 us | 1,133 | 130 KB |
+| Verifier creation | ~104 ns | 2 | 160 B |
+| Verifier.Validate | ~34.6 us | 44 | 3,328 B |
+| Verifier.Validate (parallel) | ~9.7 us | 44 | 3,328 B |
+| Transport creation | ~92.7 us | 105 | 13,048 B |
+| CertInfo | ~3.4 us | 36 | 3,144 B |
+| CertInfo (parallel) | ~2.1 us | 36 | 3,144 B |
+| JWT ValidateToken | ~40.2 us | 63 | 4,544 B |
+| JWT ValidateToken (parallel) | ~10.9 us | 44 | 3,600 B |
+| JWT Validate (HTTP) | ~39.3 us | 58 | 9,898 B |
+| API Key Validate | ~3.3 us | 15 | 5,849 B |
+| API Key Validate (parallel) | ~3.2 us | 15 | 5,849 B |
 
 ### Key takeaways
 
-- **Verifier creation is essentially free** (~44ns) -- no heavy setup needed per request
-- **Validate call takes ~43us** with full CA chain verification and OU enforcement
-- **Connection reuse is critical** -- a fresh TLS handshake costs ~487us, but reused connections bring end-to-end latency down to ~65us
-- **Good parallel scaling** -- ~1.9x throughput improvement on 2 cores
+- **Verifier creation is essentially free** (~104ns) -- no heavy setup needed per request
+- **JWT validation takes ~40us** with full signature verify, issuer/audience/scope checks
+- **API key validation takes ~3.3us** -- constant-time comparison across all keys
+- **mTLS cert validation takes ~35us** with CA chain verification and OU enforcement
+- **Good parallel scaling** -- 3-4x throughput improvement under concurrency
 
-Re-run benchmarks:
+Run benchmarks yourself:
 
 ```bash
 go test -bench=. -benchmem ./...

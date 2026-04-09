@@ -881,3 +881,83 @@ func TestJWKS_AlgorithmMismatch(t *testing.T) {
 		t.Fatal("expected error for algorithm mismatch between token and JWKS key")
 	}
 }
+
+// --- Production hardening tests ---
+
+func TestValidator_NoneAlgorithmRejected(t *testing.T) {
+	_, jwksServer := setupTestJWKS(t)
+	defer jwksServer.Close()
+
+	// Even if someone accidentally adds "none" to the allowlist, it must be rejected
+	v, err := New(
+		WithJWKSURL(jwksServer.URL),
+		WithAlgorithms("RS256", "none"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"sub":"attacker","exp":9999999999}`))
+	token := header + "." + payload + "."
+
+	_, err = v.ValidateToken(context.Background(), token)
+	if err == nil {
+		t.Fatal("expected error for 'none' algorithm — must always be rejected")
+	}
+}
+
+func TestValidator_OversizedTokenRejected(t *testing.T) {
+	_, jwksServer := setupTestJWKS(t)
+	defer jwksServer.Close()
+
+	v, err := New(WithJWKSURL(jwksServer.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a token larger than 64KB
+	bigToken := string(make([]byte, 70*1024))
+	_, err = v.ValidateToken(context.Background(), bigToken)
+	if err == nil {
+		t.Fatal("expected error for oversized token")
+	}
+}
+
+func TestValidator_OversizedKidRejected(t *testing.T) {
+	_, jwksServer := setupTestJWKS(t)
+	defer jwksServer.Close()
+
+	v, err := New(WithJWKSURL(jwksServer.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Create token with oversized kid
+	bigKid := string(make([]byte, 300))
+	header := map[string]string{"alg": "RS256", "typ": "JWT", "kid": bigKid}
+	headerJSON, _ := json.Marshal(header)
+	claimsMap := map[string]any{"sub": "test", "exp": time.Now().Add(time.Hour).Unix()}
+	claimsJSON, _ := json.Marshal(claimsMap)
+	token := base64.RawURLEncoding.EncodeToString(headerJSON) + "." +
+		base64.RawURLEncoding.EncodeToString(claimsJSON) + ".sig"
+
+	_, err = v.ValidateToken(context.Background(), token)
+	if err == nil {
+		t.Fatal("expected error for oversized kid")
+	}
+}
+
+func TestValidator_Close(t *testing.T) {
+	_, jwksServer := setupTestJWKS(t)
+	defer jwksServer.Close()
+
+	v, err := New(WithJWKSURL(jwksServer.URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := v.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+}

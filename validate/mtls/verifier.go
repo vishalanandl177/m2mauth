@@ -56,6 +56,7 @@ func WithServiceName(name string) Option {
 }
 
 // Verifier validates client certificates on inbound mTLS connections.
+// Verifier is safe for concurrent use by multiple goroutines.
 type Verifier struct {
 	cfg Config
 }

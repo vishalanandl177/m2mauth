@@ -118,3 +118,13 @@ func TestNopMetrics(t *testing.T) {
 	m.AuthValidated("svc", time.Second)
 	m.AuthRejected("svc", "expired")
 }
+
+func TestEmit_PanicRecovery(t *testing.T) {
+	// A panicking handler must not crash the caller.
+	panicHandler := EventHandlerFunc(func(_ context.Context, _ Event) {
+		panic("handler exploded")
+	})
+
+	// This must not panic.
+	Emit(context.Background(), panicHandler, EventAuthSuccess, "test", nil, 0, nil)
+}

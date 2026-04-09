@@ -100,9 +100,17 @@ func WithServiceName(name string) Option {
 
 // Client implements m2mauth.Authenticator and m2mauth.TokenSource using
 // the OAuth 2.0 Client Credentials flow with thread-safe token caching.
+// Client is safe for concurrent use by multiple goroutines.
 type Client struct {
 	cfg   Config
 	cache *tokenCache
+}
+
+// Close clears cached tokens and releases resources.
+// After Close is called, the Client should not be used.
+func (c *Client) Close() error {
+	c.cache.clear()
+	return nil
 }
 
 // New creates a new OAuth 2.0 Client Credentials client.
@@ -111,7 +119,7 @@ func New(tokenURL, clientID string, opts ...Option) (*Client, error) {
 		TokenURL:     tokenURL,
 		ClientID:     clientID,
 		ExpiryBuffer: 30 * time.Second,
-		HTTPClient:   http.DefaultClient,
+		HTTPClient:   &http.Client{Timeout: 30 * time.Second},
 		EventHandler: authlog.NopHandler(),
 		ServiceName:  clientID,
 	}
@@ -131,6 +139,12 @@ func New(tokenURL, clientID string, opts ...Option) (*Client, error) {
 	}
 	if cfg.ClientID == "" {
 		return nil, fmt.Errorf("m2mauth/oauth2: client ID is required")
+	}
+	if cfg.ClientSecret == "" && cfg.SecretProvider == nil {
+		return nil, fmt.Errorf("m2mauth/oauth2: either ClientSecret or SecretProvider must be configured")
+	}
+	if cfg.ExpiryBuffer < 0 {
+		return nil, fmt.Errorf("m2mauth/oauth2: ExpiryBuffer must be non-negative")
 	}
 
 	return &Client{

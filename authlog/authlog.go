@@ -139,10 +139,15 @@ func (nopMetrics) AuthValidated(string, time.Duration) {}
 func (nopMetrics) AuthRejected(string, string)         {}
 
 // Emit is a convenience function for sending an event to a handler.
+// It recovers from panics in the handler to prevent auth event logging
+// from crashing the application.
 func Emit(ctx context.Context, h EventHandler, evType EventType, service string, details map[string]string, dur time.Duration, err error) {
 	if h == nil {
 		return
 	}
+	defer func() {
+		recover() // Silently recover — logging must never crash auth
+	}()
 	h.HandleEvent(ctx, Event{
 		Type:      evType,
 		Timestamp: time.Now(),

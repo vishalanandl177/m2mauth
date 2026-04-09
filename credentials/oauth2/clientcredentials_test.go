@@ -173,6 +173,37 @@ func TestNew_Validation(t *testing.T) {
 	}
 }
 
+func TestNew_RequiresSecretOrProvider(t *testing.T) {
+	_, err := New("https://auth.example.com/token", "client")
+	if err == nil {
+		t.Fatal("expected error when no secret or provider")
+	}
+}
+
+func TestNew_NegativeExpiryBuffer(t *testing.T) {
+	_, err := New("https://auth.example.com/token", "client",
+		WithClientSecret("secret"),
+		WithExpiryBuffer(-time.Second),
+	)
+	if err == nil {
+		t.Fatal("expected error for negative ExpiryBuffer")
+	}
+}
+
+func TestClient_Close(t *testing.T) {
+	srv := testutil.NewMockTokenServer(3600, "read")
+	defer srv.Close()
+
+	client, err := New(srv.URL, "test", WithClientSecret("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close error: %v", err)
+	}
+}
+
 func TestNew_HTTPSEnforcement(t *testing.T) {
 	// Non-HTTPS, non-localhost should fail
 	_, err := New("http://auth.example.com/token", "client", WithClientSecret("secret"))

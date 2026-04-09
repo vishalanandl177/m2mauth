@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"fmt"
 	"net/http"
 
 	"github.com/vishalanandl177/m2mauth"
@@ -35,6 +36,12 @@ func RequireAuth(v m2mauth.Validator, opts ...ServerOption) func(http.Handler) h
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			defer func() {
+				if rv := recover(); rv != nil {
+					cfg.errorHandler(w, r, fmt.Errorf("auth validation panic: %v", rv))
+				}
+			}()
+
 			claims, err := v.Validate(r.Context(), r)
 			if err != nil {
 				cfg.errorHandler(w, r, err)

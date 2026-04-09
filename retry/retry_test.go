@@ -127,3 +127,28 @@ func TestBackoff_WithJitter(t *testing.T) {
 		}
 	}
 }
+
+func TestPolicy_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		policy  Policy
+		wantErr bool
+	}{
+		{"valid default", DefaultPolicy(), false},
+		{"negative retries", Policy{MaxRetries: -1, BaseDelay: time.Second, MaxDelay: time.Second}, true},
+		{"negative base delay", Policy{MaxRetries: 1, BaseDelay: -time.Second, MaxDelay: time.Second}, true},
+		{"base > max", Policy{MaxRetries: 1, BaseDelay: 10 * time.Second, MaxDelay: time.Second}, true},
+		{"jitter too high", Policy{MaxRetries: 1, BaseDelay: time.Second, MaxDelay: 10 * time.Second, Jitter: 1.5}, true},
+		{"negative jitter", Policy{MaxRetries: 1, BaseDelay: time.Second, MaxDelay: 10 * time.Second, Jitter: -0.1}, true},
+		{"zero max delay ok", Policy{MaxRetries: 1, BaseDelay: time.Second, MaxDelay: 0}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.policy.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}

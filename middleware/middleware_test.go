@@ -134,3 +134,25 @@ func TestRoundTripper_AuthError(t *testing.T) {
 		t.Fatal("expected error from auth failure")
 	}
 }
+
+// panicValidator panics during Validate to test panic recovery.
+type panicValidator struct{}
+
+func (p *panicValidator) Validate(_ context.Context, _ *http.Request) (*m2mauth.Claims, error) {
+	panic("validator exploded")
+}
+
+func TestRequireAuth_PanicRecovery(t *testing.T) {
+	v := &panicValidator{}
+	handler := RequireAuth(v)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called after panic")
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/data", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 after panic recovery, got %d", rec.Code)
+	}
+}

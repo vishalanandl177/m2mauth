@@ -304,3 +304,19 @@ func TestNewTransport_Rotation(t *testing.T) {
 		t.Errorf("expected rotation-v2 after rotation, got %q", info.Subject)
 	}
 }
+
+func TestTransport_DoubleStop(t *testing.T) {
+	certPEM, keyPEM, err := testutil.GenerateSelfSignedCert("test", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tr, err := NewTransport(WithCertPEM(certPEM, keyPEM))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Must not panic on double Stop
+	tr.Stop()
+	tr.Stop()
+}

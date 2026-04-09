@@ -71,6 +71,7 @@ func WithEventHandler(h authlog.EventHandler) Option {
 func WithServiceName(name string) Option { return func(c *Config) { c.ServiceName = name } }
 
 // Validator validates API keys on inbound requests.
+// Validator is safe for concurrent use by multiple goroutines.
 type Validator struct {
 	cfg Config
 }

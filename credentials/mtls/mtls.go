@@ -87,13 +87,15 @@ func WithServiceName(name string) Option {
 }
 
 // Transport creates a mTLS-configured http.Transport with optional certificate rotation.
+// Transport is safe for concurrent use by multiple goroutines.
 type Transport struct {
 	cfg Config
 
 	mu   sync.RWMutex
 	cert *tls.Certificate
 
-	stopCh chan struct{}
+	stopCh  chan struct{}
+	stopped sync.Once
 }
 
 // NewTransport creates a new mTLS transport.
@@ -166,9 +168,9 @@ func (t *Transport) HTTPTransport() (*http.Transport, error) {
 	}, nil
 }
 
-// Stop halts the certificate rotation loop.
+// Stop halts the certificate rotation loop. Safe to call multiple times.
 func (t *Transport) Stop() {
-	close(t.stopCh)
+	t.stopped.Do(func() { close(t.stopCh) })
 }
 
 // CertInfo returns information about the currently loaded certificate.

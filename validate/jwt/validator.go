@@ -93,9 +93,16 @@ func WithEventHandler(h authlog.EventHandler) Option {
 func WithServiceName(name string) Option { return func(c *Config) { c.ServiceName = name } }
 
 // Validator validates JWTs on inbound HTTP requests.
+// Validator is safe for concurrent use by multiple goroutines.
 type Validator struct {
 	cfg  Config
 	jwks *jwksCache
+}
+
+// Close releases resources held by the validator.
+// After Close is called, the Validator should not be used.
+func (v *Validator) Close() error {
+	return nil
 }
 
 // New creates a new JWT validator.
@@ -106,7 +113,7 @@ func New(opts ...Option) (*Validator, error) {
 		ScopesClaim:         "scope",
 		Algorithms:          []string{"RS256"},
 		ClockSkew:           30 * time.Second,
-		HTTPClient:          http.DefaultClient,
+		HTTPClient:          &http.Client{Timeout: 10 * time.Second},
 		EventHandler:        authlog.NopHandler(),
 		ServiceName:         "jwt-validator",
 	}
@@ -156,8 +163,21 @@ func (v *Validator) Validate(ctx context.Context, req *http.Request) (*m2mauth.C
 	return claims, nil
 }
 
+// Production safety limits.
+const (
+	maxTokenLength = 64 * 1024 // 64KB max JWT size
+	maxKidLength   = 256       // Max JWKS key ID length
+	maxScopes      = 1000      // Max scopes per token
+	maxExtraClaims = 100       // Max extra claims per token
+)
+
 // ValidateToken validates a raw JWT string and returns the claims.
 func (v *Validator) ValidateToken(ctx context.Context, tokenStr string) (*m2mauth.Claims, error) {
+	// Reject excessively large tokens to prevent DoS.
+	if len(tokenStr) > maxTokenLength {
+		return nil, m2mauth.ErrInvalidToken
+	}
+
 	// Split token.
 	parts := strings.Split(tokenStr, ".")
 	if len(parts) != 3 {
@@ -177,7 +197,17 @@ func (v *Validator) ValidateToken(ctx context.Context, tokenStr string) (*m2maut
 		return nil, m2mauth.ErrInvalidToken
 	}
 
-	// Check algorithm.
+	// Always reject "none" algorithm regardless of config (CVE prevention).
+	if strings.EqualFold(header.Alg, "none") {
+		return nil, m2mauth.ErrInvalidToken
+	}
+
+	// Reject oversized key IDs to prevent cache pollution.
+	if len(header.Kid) > maxKidLength {
+		return nil, m2mauth.ErrInvalidToken
+	}
+
+	// Check algorithm against allowlist.
 	algAllowed := false
 	for _, a := range v.cfg.Algorithms {
 		if a == header.Alg {
@@ -280,10 +310,13 @@ func (v *Validator) ValidateToken(ctx context.Context, tokenStr string) (*m2maut
 		}
 	}
 
-	// Parse scopes.
+	// Parse scopes with limit to prevent DoS.
 	var scopes []string
 	if payload.Scope != "" {
 		scopes = strings.Split(payload.Scope, " ")
+		if len(scopes) > maxScopes {
+			return nil, m2mauth.ErrInvalidToken
+		}
 	}
 
 	// Validate required scopes.
@@ -299,13 +332,16 @@ func (v *Validator) ValidateToken(ctx context.Context, tokenStr string) (*m2maut
 		}
 	}
 
-	// Build extra claims.
+	// Build extra claims with limit to prevent memory exhaustion.
 	extra := make(map[string]any)
 	for k, v := range rawPayload {
 		switch k {
 		case "sub", "iss", "aud", "iat", "exp", "nbf", "scope":
 			continue
 		default:
+			if len(extra) >= maxExtraClaims {
+				break
+			}
 			var val any
 			json.Unmarshal(v, &val)
 			extra[k] = val

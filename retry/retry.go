@@ -4,6 +4,7 @@ package retry
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"math/rand/v2"
 	"time"
@@ -73,6 +74,23 @@ func NewPolicy(opts ...Option) Policy {
 		o(&p)
 	}
 	return p
+}
+
+// Validate checks that the policy has sensible values.
+func (p *Policy) Validate() error {
+	if p.MaxRetries < 0 {
+		return fmt.Errorf("m2mauth/retry: MaxRetries must be non-negative")
+	}
+	if p.BaseDelay < 0 || p.MaxDelay < 0 {
+		return fmt.Errorf("m2mauth/retry: delays must be non-negative")
+	}
+	if p.BaseDelay > p.MaxDelay && p.MaxDelay > 0 {
+		return fmt.Errorf("m2mauth/retry: BaseDelay must be <= MaxDelay")
+	}
+	if p.Jitter < 0 || p.Jitter > 1.0 {
+		return fmt.Errorf("m2mauth/retry: Jitter must be between 0.0 and 1.0")
+	}
+	return nil
 }
 
 // Do executes fn, retrying on error according to the policy.

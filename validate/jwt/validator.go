@@ -47,6 +47,10 @@ type Config struct {
 	// Defaults to ["RS256"].
 	Algorithms []string
 
+	// MinRefreshInterval is the minimum time between JWKS refreshes,
+	// preventing thundering herd on key misses. Defaults to 5 seconds.
+	MinRefreshInterval time.Duration
+
 	// ClockSkew is the allowed clock skew for time-based validation.
 	// Defaults to 30 seconds.
 	ClockSkew time.Duration
@@ -75,7 +79,10 @@ func WithRequiredScopes(scopes ...string) Option {
 }
 func WithScopesClaim(claim string) Option     { return func(c *Config) { c.ScopesClaim = claim } }
 func WithAlgorithms(algs ...string) Option    { return func(c *Config) { c.Algorithms = algs } }
-func WithClockSkew(d time.Duration) Option    { return func(c *Config) { c.ClockSkew = d } }
+func WithMinRefreshInterval(d time.Duration) Option {
+	return func(c *Config) { c.MinRefreshInterval = d }
+}
+func WithClockSkew(d time.Duration) Option { return func(c *Config) { c.ClockSkew = d } }
 func WithHTTPClient(hc *http.Client) Option   { return func(c *Config) { c.HTTPClient = hc } }
 func WithEventHandler(h authlog.EventHandler) Option {
 	return func(c *Config) { c.EventHandler = h }
@@ -92,6 +99,7 @@ type Validator struct {
 func New(opts ...Option) (*Validator, error) {
 	cfg := Config{
 		JWKSRefreshInterval: time.Hour,
+		MinRefreshInterval:  5 * time.Second,
 		ScopesClaim:         "scope",
 		Algorithms:          []string{"RS256"},
 		ClockSkew:           30 * time.Second,
@@ -109,7 +117,7 @@ func New(opts ...Option) (*Validator, error) {
 
 	return &Validator{
 		cfg:  cfg,
-		jwks: newJWKSCache(cfg.JWKSURL, cfg.HTTPClient, cfg.JWKSRefreshInterval),
+		jwks: newJWKSCache(cfg.JWKSURL, cfg.HTTPClient, cfg.JWKSRefreshInterval, cfg.MinRefreshInterval),
 	}, nil
 }
 
@@ -371,18 +379,20 @@ type jwksCache struct {
 	url      string
 	client   *http.Client
 	interval time.Duration
+	minRefreshInterval time.Duration
 
 	mu         sync.RWMutex
 	keys       map[string]crypto.PublicKey
 	lastFetch  time.Time
 }
 
-func newJWKSCache(url string, client *http.Client, interval time.Duration) *jwksCache {
+func newJWKSCache(url string, client *http.Client, interval, minRefreshInterval time.Duration) *jwksCache {
 	return &jwksCache{
-		url:      url,
-		client:   client,
-		interval: interval,
-		keys:     make(map[string]crypto.PublicKey),
+		url:                url,
+		client:             client,
+		interval:           interval,
+		minRefreshInterval: minRefreshInterval,
+		keys:               make(map[string]crypto.PublicKey),
 	}
 }
 
@@ -420,7 +430,7 @@ func (c *jwksCache) refresh(ctx context.Context) error {
 	defer c.mu.Unlock()
 
 	// Double-check: another goroutine may have refreshed.
-	if time.Since(c.lastFetch) < 5*time.Second {
+	if time.Since(c.lastFetch) < c.minRefreshInterval {
 		return nil
 	}
 

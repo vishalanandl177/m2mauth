@@ -130,9 +130,9 @@ func NopMetrics() MetricsCollector { return nopMetrics{} }
 type nopMetrics struct{}
 
 func (nopMetrics) TokenAcquired(string, time.Duration) {}
-func (nopMetrics) TokenRefreshFailed(string, error)     {}
-func (nopMetrics) AuthValidated(string, time.Duration)  {}
-func (nopMetrics) AuthRejected(string, string)          {}
+func (nopMetrics) TokenRefreshFailed(string, error)    {}
+func (nopMetrics) AuthValidated(string, time.Duration) {}
+func (nopMetrics) AuthRejected(string, string)         {}
 
 // Emit is a convenience function for sending an event to a handler.
 func Emit(ctx context.Context, h EventHandler, evType EventType, service string, details map[string]string, dur time.Duration, err error) {

@@ -63,8 +63,8 @@ type Config struct {
 // Option configures a Config.
 type Option func(*Config)
 
-func WithStore(s KeyStore) Option            { return func(c *Config) { c.Store = s } }
-func WithHeaderName(name string) Option      { return func(c *Config) { c.HeaderName = name } }
+func WithStore(s KeyStore) Option       { return func(c *Config) { c.Store = s } }
+func WithHeaderName(name string) Option { return func(c *Config) { c.HeaderName = name } }
 func WithEventHandler(h authlog.EventHandler) Option {
 	return func(c *Config) { c.EventHandler = h }
 }

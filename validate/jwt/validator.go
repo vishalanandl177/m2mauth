@@ -71,22 +71,22 @@ type Config struct {
 // Option configures a Config.
 type Option func(*Config)
 
-func WithJWKSURL(url string) Option          { return func(c *Config) { c.JWKSURL = url } }
+func WithJWKSURL(url string) Option { return func(c *Config) { c.JWKSURL = url } }
 func WithJWKSRefreshInterval(d time.Duration) Option {
 	return func(c *Config) { c.JWKSRefreshInterval = d }
 }
-func WithIssuer(iss string) Option            { return func(c *Config) { c.Issuer = iss } }
-func WithAudience(aud ...string) Option       { return func(c *Config) { c.Audiences = aud } }
+func WithIssuer(iss string) Option      { return func(c *Config) { c.Issuer = iss } }
+func WithAudience(aud ...string) Option { return func(c *Config) { c.Audiences = aud } }
 func WithRequiredScopes(scopes ...string) Option {
 	return func(c *Config) { c.RequiredScopes = scopes }
 }
-func WithScopesClaim(claim string) Option     { return func(c *Config) { c.ScopesClaim = claim } }
-func WithAlgorithms(algs ...string) Option    { return func(c *Config) { c.Algorithms = algs } }
+func WithScopesClaim(claim string) Option  { return func(c *Config) { c.ScopesClaim = claim } }
+func WithAlgorithms(algs ...string) Option { return func(c *Config) { c.Algorithms = algs } }
 func WithMinRefreshInterval(d time.Duration) Option {
 	return func(c *Config) { c.MinRefreshInterval = d }
 }
-func WithClockSkew(d time.Duration) Option { return func(c *Config) { c.ClockSkew = d } }
-func WithHTTPClient(hc *http.Client) Option   { return func(c *Config) { c.HTTPClient = hc } }
+func WithClockSkew(d time.Duration) Option  { return func(c *Config) { c.ClockSkew = d } }
+func WithHTTPClient(hc *http.Client) Option { return func(c *Config) { c.HTTPClient = hc } }
 func WithEventHandler(h authlog.EventHandler) Option {
 	return func(c *Config) { c.EventHandler = h }
 }
@@ -392,14 +392,14 @@ type jwkEntry struct {
 }
 
 type jwksCache struct {
-	url      string
-	client   *http.Client
-	interval time.Duration
+	url                string
+	client             *http.Client
+	interval           time.Duration
 	minRefreshInterval time.Duration
 
-	mu         sync.RWMutex
-	keys       map[string]jwkEntry
-	lastFetch  time.Time
+	mu        sync.RWMutex
+	keys      map[string]jwkEntry
+	lastFetch time.Time
 }
 
 func newJWKSCache(url string, client *http.Client, interval, minRefreshInterval time.Duration) *jwksCache {

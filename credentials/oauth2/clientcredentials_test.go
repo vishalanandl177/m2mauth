@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -43,7 +42,6 @@ func TestClient_Token(t *testing.T) {
 }
 
 func TestClient_TokenCaching(t *testing.T) {
-	var fetchCount atomic.Int32
 	srv := testutil.NewMockTokenServer(3600, "read:users")
 	defer srv.Close()
 
@@ -68,7 +66,6 @@ func TestClient_TokenCaching(t *testing.T) {
 	if tok1.AccessToken != tok2.AccessToken {
 		t.Error("expected cached token to be returned")
 	}
-	_ = fetchCount
 }
 
 func TestClient_Authenticate(t *testing.T) {

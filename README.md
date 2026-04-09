@@ -599,6 +599,43 @@ m2mauth (core interfaces, zero deps)
   └── authlog             -> Structured events, slog logging, MultiHandler
 ```
 
+## Benchmarks
+
+### Component-level benchmarks
+
+| Benchmark | Latency | Allocs | Bytes/op |
+|-----------|---------|--------|----------|
+| Transport creation | ~16.6 us | 13 | 18,369 B |
+| Transport creation + rotation | ~16.6 us | 13 | 18,369 B |
+| Verifier creation | ~44 ns | 2 | 160 B |
+| Verifier.Validate (single) | ~42.9 us | 4 | 22,464 B |
+| Verifier.Validate (parallel) | ~23.4 us | 5 | 37,777 B |
+| CertInfo (single) | ~3.0 us | 7 | 34,688 B |
+| CertInfo (parallel) | ~2.4 us | 7 | 34,688 B |
+
+### End-to-end (full loopback mTLS request)
+
+| Benchmark | Latency | Allocs | Bytes/op |
+|-----------|---------|--------|----------|
+| GET -- new TLS conn each | ~786 us | 1,626 | 176 KB |
+| GET -- reused conn | ~65.4 us | 12 | 39.4 KB |
+| POST -- reused conn | ~79.8 us | 164 | 12.4 KB |
+| GET -- parallel, reused | ~34.3 us | 12 | 39.4 KB |
+| TLS handshake only | ~487 us | 1,133 | 130 KB |
+
+### Key takeaways
+
+- **Verifier creation is essentially free** (~44ns) -- no heavy setup needed per request
+- **Validate call takes ~43us** with full CA chain verification and OU enforcement
+- **Connection reuse is critical** -- a fresh TLS handshake costs ~487us, but reused connections bring end-to-end latency down to ~65us
+- **Good parallel scaling** -- ~1.9x throughput improvement on 2 cores
+
+Re-run benchmarks:
+
+```bash
+go test -bench=. -benchmem ./...
+```
+
 ## Security
 
 This library is hardened against common vulnerabilities:

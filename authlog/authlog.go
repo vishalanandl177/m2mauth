@@ -74,17 +74,21 @@ func (m *MultiHandler) HandleEvent(ctx context.Context, event Event) {
 	}
 }
 
-// SlogHandler logs events via slog.
+// SlogHandler logs events via slog with context propagation.
+// When used with an OTel-bridged slog handler, trace/span IDs are
+// automatically included in log output.
 type SlogHandler struct {
 	logger *slog.Logger
 }
 
 // NewSlogHandler creates an EventHandler that logs to the given slog.Logger.
+// Pass slog.Default() to use the global logger, or provide a custom logger
+// configured with JSON/text handler and OTel bridge as needed.
 func NewSlogHandler(logger *slog.Logger) *SlogHandler {
 	return &SlogHandler{logger: logger}
 }
 
-func (h *SlogHandler) HandleEvent(_ context.Context, event Event) {
+func (h *SlogHandler) HandleEvent(ctx context.Context, event Event) {
 	attrs := []slog.Attr{
 		slog.String("event_type", string(event.Type)),
 		slog.String("service", event.Service),
@@ -104,9 +108,9 @@ func (h *SlogHandler) HandleEvent(_ context.Context, event Event) {
 
 	if event.Error != nil {
 		args = append(args, slog.String("error", event.Error.Error()))
-		h.logger.Error("auth event", args...)
+		h.logger.ErrorContext(ctx, "auth event", args...)
 	} else {
-		h.logger.Info("auth event", args...)
+		h.logger.InfoContext(ctx, "auth event", args...)
 	}
 }
 

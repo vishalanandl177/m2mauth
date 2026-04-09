@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/vishalanandl177/m2mauth/authlog"
 	"github.com/vishalanandl177/m2mauth/internal/testutil"
 )
 
@@ -113,6 +114,159 @@ func TestCertInfo_IsExpiring(t *testing.T) {
 	}
 	if ci.IsExpiring(1 * time.Hour) {
 		t.Error("cert not expiring within 1h should not be flagged")
+	}
+}
+
+func TestNewTransport_NoCertSource(t *testing.T) {
+	_, err := NewTransport()
+	if err == nil {
+		t.Fatal("expected error when no cert source configured")
+	}
+}
+
+func TestNewTransport_WithCAFile(t *testing.T) {
+	certPEM, keyPEM, err := testutil.GenerateSelfSignedCert("ca-file-test", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caCertPEM, _, _, _, err := testutil.GenerateCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	caFile := filepath.Join(dir, "ca.pem")
+	os.WriteFile(caFile, caCertPEM, 0o600)
+
+	tr, err := NewTransport(
+		WithCertPEM(certPEM, keyPEM),
+		WithCACertFile(caFile),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Stop()
+
+	tlsCfg, err := tr.TLSConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tlsCfg.RootCAs == nil {
+		t.Error("expected RootCAs to be set")
+	}
+}
+
+func TestNewTransport_InvalidCAFile(t *testing.T) {
+	certPEM, keyPEM, err := testutil.GenerateSelfSignedCert("test", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tr, err := NewTransport(WithCertPEM(certPEM, keyPEM), WithCACertFile("/nonexistent/ca.pem"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Stop()
+
+	_, err = tr.TLSConfig()
+	if err == nil {
+		t.Fatal("expected error for missing CA file")
+	}
+}
+
+func TestNewTransport_InvalidCAPEM(t *testing.T) {
+	certPEM, keyPEM, err := testutil.GenerateSelfSignedCert("test", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tr, err := NewTransport(WithCertPEM(certPEM, keyPEM), WithCACertPEM([]byte("not-a-cert")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Stop()
+
+	_, err = tr.TLSConfig()
+	if err == nil {
+		t.Fatal("expected error for invalid CA PEM")
+	}
+}
+
+func TestNewTransport_WithServerName(t *testing.T) {
+	certPEM, keyPEM, err := testutil.GenerateSelfSignedCert("test", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tr, err := NewTransport(WithCertPEM(certPEM, keyPEM), WithServerName("custom.local"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Stop()
+
+	tlsCfg, err := tr.TLSConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tlsCfg.ServerName != "custom.local" {
+		t.Errorf("expected server name custom.local, got %q", tlsCfg.ServerName)
+	}
+}
+
+func TestNewTransport_WithOptions(t *testing.T) {
+	certPEM, keyPEM, err := testutil.GenerateSelfSignedCert("test", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tr, err := NewTransport(
+		WithCertPEM(certPEM, keyPEM),
+		WithEventHandler(authlog.NopHandler()),
+		WithServiceName("my-svc"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Stop()
+}
+
+func TestTransport_CertInfoNil(t *testing.T) {
+	certPEM, keyPEM, err := testutil.GenerateSelfSignedCert("test", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tr, err := NewTransport(WithCertPEM(certPEM, keyPEM))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Stop()
+
+	// Force nil cert to test nil path
+	tr.mu.Lock()
+	tr.cert = nil
+	tr.mu.Unlock()
+
+	if info := tr.CertInfo(); info != nil {
+		t.Error("expected nil CertInfo when cert is nil")
+	}
+}
+
+func TestTransport_HTTPTransportError(t *testing.T) {
+	certPEM, keyPEM, err := testutil.GenerateSelfSignedCert("test", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tr, err := NewTransport(WithCertPEM(certPEM, keyPEM), WithCACertFile("/nonexistent"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Stop()
+
+	_, err = tr.HTTPTransport()
+	if err == nil {
+		t.Fatal("expected error for bad CA in HTTPTransport")
 	}
 }
 

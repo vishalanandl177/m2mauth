@@ -2,7 +2,9 @@ package oauth2
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -171,5 +173,179 @@ func TestNew_Validation(t *testing.T) {
 	_, err = New("https://auth.example.com/token", "")
 	if err == nil {
 		t.Fatal("expected error for empty client ID")
+	}
+}
+
+func TestNew_HTTPSEnforcement(t *testing.T) {
+	// Non-HTTPS, non-localhost should fail
+	_, err := New("http://auth.example.com/token", "client", WithClientSecret("secret"))
+	if err == nil {
+		t.Fatal("expected error for non-HTTPS token URL")
+	}
+
+	// localhost should be allowed
+	srv := testutil.NewMockTokenServer(3600, "read:users")
+	defer srv.Close()
+	_, err = New(srv.URL, "client", WithClientSecret("secret"))
+	if err != nil {
+		t.Fatalf("expected localhost to be allowed, got: %v", err)
+	}
+}
+
+func TestClient_WithSecretProvider(t *testing.T) {
+	srv := testutil.NewMockTokenServer(3600, "read:users")
+	defer srv.Close()
+
+	sp := &staticSecret{val: "provider-secret"}
+	client, err := New(srv.URL, "test-client",
+		WithSecretProvider(sp, "client_secret"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tok, err := client.Token(context.Background())
+	if err != nil {
+		t.Fatalf("Token() error: %v", err)
+	}
+	if tok.AccessToken == "" {
+		t.Fatal("expected non-empty token")
+	}
+}
+
+type staticSecret struct{ val string }
+
+func (s *staticSecret) GetSecret(_ context.Context, _ string) (string, error) {
+	return s.val, nil
+}
+
+func TestClient_WithAllOptions(t *testing.T) {
+	srv := testutil.NewMockTokenServer(3600, "read:users")
+	defer srv.Close()
+
+	_, err := New(srv.URL, "test-client",
+		WithClientSecret("secret"),
+		WithExpiryBuffer(10*time.Second),
+		WithHTTPClient(http.DefaultClient),
+		WithEventHandler(nil),
+		WithServiceName("my-svc"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClient_TokenServerError(t *testing.T) {
+	// Create a server that returns 500
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	client, err := New(srv.URL, "test-client", WithClientSecret("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = client.Token(context.Background())
+	if err == nil {
+		t.Fatal("expected error from 500 response")
+	}
+}
+
+func TestClient_AuthenticateFailure(t *testing.T) {
+	// Server that returns 401
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	client, err := New(srv.URL, "test-client", WithClientSecret("bad-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, "https://api.example.com/users", nil)
+	err = client.Authenticate(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected error when token fetch fails")
+	}
+}
+
+func TestClient_InvalidTokenURL(t *testing.T) {
+	_, err := New("://bad-url", "client", WithClientSecret("secret"))
+	if err == nil {
+		t.Fatal("expected error for invalid URL")
+	}
+}
+
+func TestClient_TokenBadJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("not-json"))
+	}))
+	defer srv.Close()
+
+	client, err := New(srv.URL, "test-client", WithClientSecret("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = client.Token(context.Background())
+	if err == nil {
+		t.Fatal("expected error from bad JSON response")
+	}
+}
+
+func TestClient_EmptyAccessToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"access_token":"","token_type":"Bearer","expires_in":3600}`))
+	}))
+	defer srv.Close()
+
+	client, err := New(srv.URL, "test-client", WithClientSecret("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = client.Token(context.Background())
+	if err == nil {
+		t.Fatal("expected error for empty access_token")
+	}
+}
+
+func TestClient_SecretProviderError(t *testing.T) {
+	srv := testutil.NewMockTokenServer(3600, "read")
+	defer srv.Close()
+
+	sp := &failingSecret{}
+	client, err := New(srv.URL, "test-client", WithSecretProvider(sp, "key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = client.Token(context.Background())
+	if err == nil {
+		t.Fatal("expected error from secret provider")
+	}
+}
+
+type failingSecret struct{}
+
+func (f *failingSecret) GetSecret(_ context.Context, _ string) (string, error) {
+	return "", fmt.Errorf("vault unavailable")
+}
+
+func TestClient_NetworkError(t *testing.T) {
+	// Use a URL that will fail to connect
+	client, err := New("http://127.0.0.1:1/token", "test-client", WithClientSecret("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = client.Token(context.Background())
+	if err == nil {
+		t.Fatal("expected network error")
 	}
 }

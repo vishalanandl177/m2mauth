@@ -122,6 +122,13 @@ func New(tokenURL, clientID string, opts ...Option) (*Client, error) {
 	if cfg.TokenURL == "" {
 		return nil, fmt.Errorf("m2mauth/oauth2: token URL is required")
 	}
+	parsed, err := url.Parse(cfg.TokenURL)
+	if err != nil {
+		return nil, fmt.Errorf("m2mauth/oauth2: invalid token URL: %w", err)
+	}
+	if parsed.Scheme != "https" && !strings.HasPrefix(parsed.Host, "localhost") && !strings.HasPrefix(parsed.Host, "127.0.0.1") {
+		return nil, fmt.Errorf("m2mauth/oauth2: token URL must use HTTPS")
+	}
 	if cfg.ClientID == "" {
 		return nil, fmt.Errorf("m2mauth/oauth2: client ID is required")
 	}
@@ -226,7 +233,8 @@ func (c *Client) doTokenRequest(ctx context.Context, secret string) (*m2mauth.To
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	// Limit response body to 1MB to prevent resource exhaustion.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
 	if err != nil {
 		return nil, &m2mauth.AuthError{Op: "token_fetch", Kind: "network", Err: err, Retryable: true}
 	}
@@ -236,7 +244,7 @@ func (c *Client) doTokenRequest(ctx context.Context, secret string) (*m2mauth.To
 		return nil, &m2mauth.AuthError{
 			Op:        "token_fetch",
 			Kind:      "response",
-			Err:       fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body)),
+			Err:       fmt.Errorf("token endpoint returned HTTP %d", resp.StatusCode),
 			Retryable: retryable,
 		}
 	}
@@ -249,6 +257,10 @@ func (c *Client) doTokenRequest(ctx context.Context, secret string) (*m2mauth.To
 	}
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
 		return nil, &m2mauth.AuthError{Op: "token_fetch", Kind: "decode", Err: err, Retryable: false}
+	}
+	if tokenResp.AccessToken == "" {
+		return nil, &m2mauth.AuthError{Op: "token_fetch", Kind: "validation",
+			Err: fmt.Errorf("token server returned empty access_token"), Retryable: false}
 	}
 
 	var scopes []string

@@ -280,6 +280,22 @@ func (t *Transport) rotateCert() {
 		return
 	}
 
+	// Validate the new certificate is not already expired before accepting it.
+	if len(cert.Certificate) > 0 {
+		parsed, parseErr := x509.ParseCertificate(cert.Certificate[0])
+		if parseErr != nil {
+			authlog.Emit(ctx, t.cfg.EventHandler, authlog.EventCertLoadErr, t.cfg.ServiceName,
+				map[string]string{"cert_file": t.cfg.CertFile, "reason": "parse_failed"}, 0, parseErr)
+			return
+		}
+		if time.Now().After(parsed.NotAfter) {
+			authlog.Emit(ctx, t.cfg.EventHandler, authlog.EventCertLoadErr, t.cfg.ServiceName,
+				map[string]string{"cert_file": t.cfg.CertFile, "reason": "cert_expired"}, 0,
+				fmt.Errorf("rotated certificate is already expired (NotAfter: %s)", parsed.NotAfter.Format(time.RFC3339)))
+			return
+		}
+	}
+
 	t.mu.Lock()
 	t.cert = cert
 	t.mu.Unlock()

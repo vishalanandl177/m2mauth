@@ -114,3 +114,16 @@ func TestBackoff(t *testing.T) {
 		t.Errorf("attempt 20: got %v, want 5s (capped)", d10)
 	}
 }
+
+func TestBackoff_WithJitter(t *testing.T) {
+	p := NewPolicy(WithBaseDelay(100*time.Millisecond), WithMaxDelay(10*time.Second), WithJitter(0.5))
+	// With 50% jitter, delay should vary but stay in range [50ms, 150ms] for attempt 0
+	min := 50 * time.Millisecond
+	max := 150 * time.Millisecond
+	for i := 0; i < 100; i++ {
+		d := p.backoff(0)
+		if d < min || d > max {
+			t.Errorf("jittered delay %v outside expected range [%v, %v]", d, min, max)
+		}
+	}
+}

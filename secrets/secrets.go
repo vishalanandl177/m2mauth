@@ -30,7 +30,7 @@ func (p *EnvProvider) GetSecret(_ context.Context, key string) (string, error) {
 	if val == "" {
 		return "", fmt.Errorf("%w: env var %q not set", m2mauth.ErrSecretNotFound, envKey)
 	}
-	return val, nil
+	return strings.TrimSpace(val), nil
 }
 
 // FileProvider reads secrets from files, one secret per file.
@@ -47,6 +47,18 @@ func NewFileProvider(basePath string) *FileProvider {
 
 func (p *FileProvider) GetSecret(_ context.Context, key string) (string, error) {
 	path := filepath.Join(p.basePath, key)
+	// Prevent path traversal: ensure resolved path stays within basePath.
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("m2mauth/secrets: resolve path: %w", err)
+	}
+	absBase, err := filepath.Abs(p.basePath)
+	if err != nil {
+		return "", fmt.Errorf("m2mauth/secrets: resolve base: %w", err)
+	}
+	if !strings.HasPrefix(absPath, absBase+string(filepath.Separator)) && absPath != absBase {
+		return "", fmt.Errorf("m2mauth/secrets: path traversal detected in key %q", key)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {

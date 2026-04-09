@@ -12,8 +12,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"math/big"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -114,6 +117,13 @@ func New(opts ...Option) (*Validator, error) {
 	if cfg.JWKSURL == "" {
 		return nil, fmt.Errorf("m2mauth/jwt: JWKS URL is required")
 	}
+	parsed, err := url.Parse(cfg.JWKSURL)
+	if err != nil {
+		return nil, fmt.Errorf("m2mauth/jwt: invalid JWKS URL: %w", err)
+	}
+	if parsed.Scheme != "https" && !strings.HasPrefix(parsed.Host, "localhost") && !strings.HasPrefix(parsed.Host, "127.0.0.1") {
+		return nil, fmt.Errorf("m2mauth/jwt: JWKS URL must use HTTPS")
+	}
 
 	return &Validator{
 		cfg:  cfg,
@@ -176,11 +186,11 @@ func (v *Validator) ValidateToken(ctx context.Context, tokenStr string) (*m2maut
 		}
 	}
 	if !algAllowed {
-		return nil, fmt.Errorf("%w: algorithm %q not allowed", m2mauth.ErrInvalidToken, header.Alg)
+		return nil, m2mauth.ErrInvalidToken
 	}
 
-	// Get signing key from JWKS.
-	key, err := v.jwks.getKey(ctx, header.Kid)
+	// Get signing key from JWKS (also validates key algorithm matches token).
+	key, err := v.jwks.getKey(ctx, header.Kid, header.Alg)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", m2mauth.ErrInvalidSignature, err)
 	}
@@ -251,7 +261,7 @@ func (v *Validator) ValidateToken(ctx context.Context, tokenStr string) (*m2maut
 
 	// Validate issuer.
 	if v.cfg.Issuer != "" && payload.Iss != v.cfg.Issuer {
-		return nil, fmt.Errorf("%w: got %q, want %q", m2mauth.ErrInvalidIssuer, payload.Iss, v.cfg.Issuer)
+		return nil, m2mauth.ErrInvalidIssuer
 	}
 
 	// Validate audience.
@@ -284,7 +294,7 @@ func (v *Validator) ValidateToken(ctx context.Context, tokenStr string) (*m2maut
 		}
 		for _, req := range v.cfg.RequiredScopes {
 			if _, ok := have[req]; !ok {
-				return nil, fmt.Errorf("%w: missing %q", m2mauth.ErrInsufficientScope, req)
+				return nil, m2mauth.ErrInsufficientScope
 			}
 		}
 	}
@@ -375,6 +385,12 @@ func verifySignature(alg string, key crypto.PublicKey, signingInput, signature [
 
 // --- JWKS Cache ---
 
+// jwkEntry holds a parsed public key together with the algorithm declared in JWKS.
+type jwkEntry struct {
+	key crypto.PublicKey
+	alg string
+}
+
 type jwksCache struct {
 	url      string
 	client   *http.Client
@@ -382,7 +398,7 @@ type jwksCache struct {
 	minRefreshInterval time.Duration
 
 	mu         sync.RWMutex
-	keys       map[string]crypto.PublicKey
+	keys       map[string]jwkEntry
 	lastFetch  time.Time
 }
 
@@ -392,37 +408,46 @@ func newJWKSCache(url string, client *http.Client, interval, minRefreshInterval 
 		client:             client,
 		interval:           interval,
 		minRefreshInterval: minRefreshInterval,
-		keys:               make(map[string]crypto.PublicKey),
+		keys:               make(map[string]jwkEntry),
 	}
 }
 
-func (c *jwksCache) getKey(ctx context.Context, kid string) (crypto.PublicKey, error) {
+func (c *jwksCache) getKey(ctx context.Context, kid, alg string) (crypto.PublicKey, error) {
 	c.mu.RLock()
-	key, ok := c.keys[kid]
+	entry, ok := c.keys[kid]
 	needsRefresh := time.Since(c.lastFetch) > c.interval
 	c.mu.RUnlock()
 
 	if ok && !needsRefresh {
-		return key, nil
+		if entry.alg != "" && entry.alg != alg {
+			return nil, fmt.Errorf("key %q algorithm %q does not match token algorithm %q", kid, entry.alg, alg)
+		}
+		return entry.key, nil
 	}
 
 	// Refresh and retry.
 	if err := c.refresh(ctx); err != nil {
 		// If we had a cached key, return it despite refresh failure.
 		if ok {
-			return key, nil
+			if entry.alg != "" && entry.alg != alg {
+				return nil, fmt.Errorf("key %q algorithm %q does not match token algorithm %q", kid, entry.alg, alg)
+			}
+			return entry.key, nil
 		}
 		return nil, fmt.Errorf("JWKS fetch failed: %w", err)
 	}
 
 	c.mu.RLock()
-	key, ok = c.keys[kid]
+	entry, ok = c.keys[kid]
 	c.mu.RUnlock()
 
 	if !ok {
 		return nil, fmt.Errorf("key %q not found in JWKS", kid)
 	}
-	return key, nil
+	if entry.alg != "" && entry.alg != alg {
+		return nil, fmt.Errorf("key %q algorithm %q does not match token algorithm %q", kid, entry.alg, alg)
+	}
+	return entry.key, nil
 }
 
 func (c *jwksCache) refresh(ctx context.Context) error {
@@ -452,17 +477,19 @@ func (c *jwksCache) refresh(ctx context.Context) error {
 	var jwksResp struct {
 		Keys []jwkKey `json:"keys"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&jwksResp); err != nil {
+	// Limit response body to 10MB to prevent resource exhaustion.
+	limitedBody := io.LimitReader(resp.Body, 10*1024*1024)
+	if err := json.NewDecoder(limitedBody).Decode(&jwksResp); err != nil {
 		return fmt.Errorf("decode JWKS: %w", err)
 	}
 
-	keys := make(map[string]crypto.PublicKey, len(jwksResp.Keys))
+	keys := make(map[string]jwkEntry, len(jwksResp.Keys))
 	for _, k := range jwksResp.Keys {
 		pub, err := k.toPublicKey()
 		if err != nil {
 			continue // Skip keys we can't parse.
 		}
-		keys[k.Kid] = pub
+		keys[k.Kid] = jwkEntry{key: pub, alg: k.Alg}
 	}
 
 	c.keys = keys
@@ -505,6 +532,11 @@ func (k *jwkKey) toRSAPublicKey() (*rsa.PublicKey, error) {
 
 	n := new(big.Int).SetBytes(nBytes)
 	e := new(big.Int).SetBytes(eBytes)
+
+	// Validate exponent is a safe positive integer (prevents truncation attacks).
+	if e.Sign() <= 0 || !e.IsInt64() || e.Int64() > math.MaxInt32 {
+		return nil, fmt.Errorf("invalid RSA exponent")
+	}
 
 	return &rsa.PublicKey{
 		N: n,

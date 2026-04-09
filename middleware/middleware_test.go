@@ -96,3 +96,41 @@ func TestRequireAuth_Failure(t *testing.T) {
 		t.Errorf("expected 401, got %d", rec.Code)
 	}
 }
+
+func TestRequireAuth_CustomErrorHandler(t *testing.T) {
+	v := &mockValidator{err: m2mauth.ErrMissingToken}
+	customHandler := func(w http.ResponseWriter, r *http.Request, err error) {
+		http.Error(w, `{"error":"custom"}`, http.StatusForbidden)
+	}
+
+	handler := RequireAuth(v, WithErrorHandler(customHandler))(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called on auth failure")
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/data", nil)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("expected 403, got %d", rec.Code)
+	}
+}
+
+func TestRoundTripper_NilBase(t *testing.T) {
+	rt := NewRoundTripper(nil, &mockAuth{token: "test"})
+	// Should use http.DefaultTransport — just verify it's not nil
+	if rt.base == nil {
+		t.Error("expected default transport when nil passed")
+	}
+}
+
+func TestRoundTripper_AuthError(t *testing.T) {
+	errAuth := &mockAuth{err: m2mauth.ErrTokenFetchFailed}
+	rt := NewRoundTripper(http.DefaultTransport, errAuth)
+
+	req := httptest.NewRequest(http.MethodGet, "https://example.com", nil)
+	_, err := rt.RoundTrip(req)
+	if err == nil {
+		t.Fatal("expected error from auth failure")
+	}
+}

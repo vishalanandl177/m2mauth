@@ -13,6 +13,10 @@ import (
 
 // KeyStore looks up API key metadata. Implement this interface to back
 // the validator with a database, Redis, config file, etc.
+//
+// Security: implementations MUST use constant-time comparison
+// (crypto/subtle.ConstantTimeCompare) when matching keys to prevent
+// timing side-channel attacks. See MapStore for a reference implementation.
 type KeyStore interface {
 	// Lookup returns the claims associated with the given API key.
 	// Returns nil claims and nil error if the key is not found.
@@ -30,13 +34,15 @@ func NewMapStore(keys map[string]*m2mauth.Claims) *MapStore {
 }
 
 func (s *MapStore) Lookup(_ context.Context, key string) (*m2mauth.Claims, error) {
-	// Use constant-time comparison to prevent timing attacks.
+	// Iterate all keys with constant-time comparison to prevent timing attacks.
+	// Always iterate the full map to avoid leaking the position of a match.
+	var foundClaims *m2mauth.Claims
 	for k, claims := range s.keys {
 		if subtle.ConstantTimeCompare([]byte(k), []byte(key)) == 1 {
-			return claims, nil
+			foundClaims = claims
 		}
 	}
-	return nil, nil
+	return foundClaims, nil
 }
 
 // Config holds validation configuration.

@@ -257,7 +257,7 @@ func (c *Client) doTokenRequest(ctx context.Context, secret string) (*m2mauth.To
 	}
 
 	raw := make(map[string]any)
-	json.Unmarshal(body, &raw)
+	_ = json.Unmarshal(body, &raw) // best-effort: body already validated above
 
 	return &m2mauth.Token{
 		AccessToken: tokenResp.AccessToken,

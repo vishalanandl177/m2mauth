@@ -2,7 +2,38 @@
 
 A batteries-included Go library for **Machine-to-Machine (M2M) authentication** — covering OAuth 2.0 Client Credentials, mTLS, API Keys, and JWT validation.
 
-Zero external dependencies. Works with `net/http` out of the box. Framework adapters available for **Gin**.
+Zero external dependencies. Works with `net/http` out of the box. Framework adapters available for **Gin**. Observability via **slog** (built-in) and **OpenTelemetry** (optional).
+
+## Install
+
+### Core library (zero dependencies)
+
+```bash
+go get github.com/vishalanandl177/m2mauth
+```
+
+This gives you everything needed for `net/http`: OAuth2, mTLS, API keys, JWT validation, middleware, secrets, retry, and slog-based logging. No additional setup required.
+
+### Gin framework adapter (optional)
+
+```bash
+go get github.com/vishalanandl177/m2mauth/contrib/ginauth
+```
+
+This installs the Gin middleware adapter. After installing, you need to **wire it into your Gin router** — see [Gin JWT example](#inbound-jwt-validation-gin) and [Gin mTLS example](#inbound-mtls-verification-gin) below. Just installing the package does not automatically enable authentication on your routes.
+
+### OpenTelemetry integration (optional)
+
+```bash
+go get github.com/vishalanandl177/m2mauth/contrib/otel
+```
+
+This installs the OTel event handler. After installing, you need to:
+
+1. **Initialize your OTel providers** (TracerProvider, MeterProvider) as you normally would
+2. **Create an `m2motel.NewEventHandler()`** and pass it to your m2mauth components via `WithEventHandler()`
+
+Just installing the package does **not** automatically enable tracing or metrics. See the [OpenTelemetry setup guide](#opentelemetry-tracing-and-metrics) below.
 
 ## Features
 
@@ -270,24 +301,6 @@ A common microservices pattern where a gateway validates incoming requests and a
   See: _examples/gin_oauth2_client
 ```
 
-## Install
-
-```bash
-go get github.com/vishalanandl177/m2mauth
-```
-
-For Gin framework support:
-
-```bash
-go get github.com/vishalanandl177/m2mauth/contrib/ginauth
-```
-
-For OpenTelemetry integration:
-
-```bash
-go get github.com/vishalanandl177/m2mauth/contrib/otel
-```
-
 ## Quick Start
 
 ### Outbound: OAuth 2.0 Client Credentials
@@ -462,31 +475,67 @@ Log output:
 
 The `contrib/otel` package implements `authlog.EventHandler` with OTel tracing spans and metric instruments. It works with any OTel-compatible backend (Jaeger, Zipkin, Datadog, Grafana Tempo, etc.).
 
+> **Note:** Just installing `contrib/otel` does not auto-enable tracing. You must complete all 3 steps below.
+
+**Step 1 — Initialize OTel providers** (standard OTel setup, not m2mauth-specific):
+
 ```go
 import (
-    m2motel "github.com/vishalanandl177/m2mauth/contrib/otel"
-    "github.com/vishalanandl177/m2mauth/authlog"
+    "go.opentelemetry.io/otel"
+    sdktrace "go.opentelemetry.io/otel/sdk/trace"
+    sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
-// Create OTel handler (uses global TracerProvider/MeterProvider by default)
+// Set up your exporter (Jaeger, OTLP, stdout, etc.)
+tp := sdktrace.NewTracerProvider(/* ... */)
+mp := sdkmetric.NewMeterProvider(/* ... */)
+otel.SetTracerProvider(tp)
+otel.SetMeterProvider(mp)
+defer tp.Shutdown(ctx)
+defer mp.Shutdown(ctx)
+```
+
+**Step 2 — Create the m2mauth OTel handler:**
+
+```go
+import m2motel "github.com/vishalanandl177/m2mauth/contrib/otel"
+
+// Uses the global providers set above
 otelHandler := m2motel.NewEventHandler()
 
-// Or with explicit providers
+// Or pass providers explicitly
 otelHandler := m2motel.NewEventHandler(
     m2motel.WithTracerProvider(tp),
     m2motel.WithMeterProvider(mp),
 )
+```
 
-// Combine with slog for logs + traces + metrics
+**Step 3 — Wire the handler into your m2mauth components:**
+
+```go
+// Pass to any component that accepts WithEventHandler
+v, _ := jwt.New(
+    jwt.WithJWKSURL("https://auth.example.com/.well-known/jwks.json"),
+    jwt.WithEventHandler(otelHandler),
+)
+
+auth, _ := oauth2.New(tokenURL, clientID,
+    oauth2.WithClientSecret("secret"),
+    oauth2.WithEventHandler(otelHandler),
+)
+```
+
+**Combine with slog** for logs + traces + metrics in one handler:
+
+```go
 handler := authlog.NewMultiHandler(
     authlog.NewSlogHandler(slog.Default()),  // Structured logs
     otelHandler,                              // OTel traces + metrics
 )
 
-// Use with any m2mauth component
 v, _ := jwt.New(
     jwt.WithJWKSURL("https://auth.example.com/.well-known/jwks.json"),
-    jwt.WithEventHandler(handler),
+    jwt.WithEventHandler(handler),  // Both slog and OTel receive events
 )
 ```
 
@@ -521,15 +570,16 @@ handler := authlog.NewMultiHandler(
 )
 ```
 
-## Framework Support
+## Framework and Integration Support
 
-| Framework | Package | Install |
-|-----------|---------|---------|
-| `net/http` | `middleware` | Included (zero deps) |
-| **Gin** | `contrib/ginauth` | `go get github.com/vishalanandl177/m2mauth/contrib/ginauth` |
-| **OpenTelemetry** | `contrib/otel` | `go get github.com/vishalanandl177/m2mauth/contrib/otel` |
+| Integration | Package | Install | Auto-enabled? |
+|-------------|---------|---------|---------------|
+| `net/http` | `middleware` | Included | Yes -- works out of the box |
+| **Gin** | `contrib/ginauth` | `go get .../contrib/ginauth` | No -- wire into router with `ginauth.RequireAuth(v)` |
+| **OpenTelemetry** | `contrib/otel` | `go get .../contrib/otel` | No -- create handler + pass via `WithEventHandler()` |
+| **slog** | `authlog` | Included | No -- create `NewSlogHandler(logger)` + pass via `WithEventHandler()` |
 
-The `contrib/` adapters are separate Go modules so the core library stays zero-dependency. The Gin adapter works with any `m2mauth.Validator` (JWT, API Key, mTLS). The OTel adapter works with any `authlog.EventHandler` consumer.
+The `contrib/` adapters are separate Go modules so the core library stays zero-dependency. The Gin adapter works with any `m2mauth.Validator` (JWT, API Key, mTLS). The OTel adapter works with any component that accepts `WithEventHandler()`.
 
 ## Architecture
 

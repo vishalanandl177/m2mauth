@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/vishalanandl177/m2mauth"
 	"github.com/vishalanandl177/m2mauth/authlog"
@@ -93,6 +94,14 @@ func (v *Verifier) Validate(ctx context.Context, req *http.Request) (*m2mauth.Cl
 				map[string]string{"reason": "cert_not_trusted", "cn": cert.Subject.CommonName}, 0, err)
 			return nil, m2mauth.ErrCertNotTrusted
 		}
+	}
+
+	// Always check certificate expiry regardless of TrustedCAs config.
+	now := time.Now()
+	if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
+		authlog.Emit(ctx, v.cfg.EventHandler, authlog.EventAuthFailure, v.cfg.ServiceName,
+			map[string]string{"reason": "cert_expired", "cn": cert.Subject.CommonName}, 0, nil)
+		return nil, m2mauth.ErrCertExpired
 	}
 
 	// Check CN constraint.

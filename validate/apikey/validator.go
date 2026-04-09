@@ -13,6 +13,10 @@ import (
 
 // KeyStore looks up API key metadata. Implement this interface to back
 // the validator with a database, Redis, config file, etc.
+//
+// Security: implementations MUST use constant-time comparison
+// (crypto/subtle.ConstantTimeCompare) when matching keys to prevent
+// timing side-channel attacks. See MapStore for a reference implementation.
 type KeyStore interface {
 	// Lookup returns the claims associated with the given API key.
 	// Returns nil claims and nil error if the key is not found.

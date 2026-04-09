@@ -83,3 +83,50 @@ func TestNew_RequiresStore(t *testing.T) {
 		t.Fatal("expected error when no store is set")
 	}
 }
+
+func TestValidator_StoreError(t *testing.T) {
+	store := &errorStore{err: errors.New("db connection failed")}
+	v, err := New(WithStore(store))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/data", nil)
+	req.Header.Set("X-API-Key", "some-key")
+
+	_, err = v.Validate(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected error from store")
+	}
+}
+
+type errorStore struct{ err error }
+
+func (s *errorStore) Lookup(_ context.Context, _ string) (*m2mauth.Claims, error) {
+	return nil, s.err
+}
+
+func TestValidator_WithOptions(t *testing.T) {
+	store := NewMapStore(map[string]*m2mauth.Claims{
+		"key": {Subject: "svc"},
+	})
+	v, err := New(
+		WithStore(store),
+		WithEventHandler(nil),
+		WithServiceName("my-apikey-validator"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/data", nil)
+	req.Header.Set("X-API-Key", "key")
+
+	claims, err := v.Validate(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claims.Subject != "svc" {
+		t.Errorf("expected subject svc, got %q", claims.Subject)
+	}
+}

@@ -244,3 +244,39 @@ func TestVerifier_NoTrustedCAs_SkipsVerification(t *testing.T) {
 		t.Errorf("expected subject svc-test, got %q", claims.Subject)
 	}
 }
+
+func TestVerifier_ExpiredCert(t *testing.T) {
+	caCert, caKey, _ := generateCA(t)
+	// Create a cert that expired 1 hour ago
+	expiredCert := signClientCert(t, caCert, caKey, certOpts{
+		cn:       "svc-expired",
+		notAfter: time.Now().Add(-time.Hour),
+	})
+
+	v := New() // no TrustedCAs
+	_, err := v.Validate(context.Background(), reqWithCerts(expiredCert))
+	if err == nil {
+		t.Fatal("expected error for expired certificate")
+	}
+	if err != m2mauth.ErrCertExpired {
+		t.Errorf("expected ErrCertExpired, got %v", err)
+	}
+}
+
+func TestVerifier_WithOptions(t *testing.T) {
+	caCert, caKey, pool := generateCA(t)
+	clientCert := signClientCert(t, caCert, caKey, certOpts{cn: "svc-test"})
+
+	v := New(
+		WithTrustedCAs(pool),
+		WithEventHandler(nil),
+		WithServiceName("my-mtls-verifier"),
+	)
+	claims, err := v.Validate(context.Background(), reqWithCerts(clientCert))
+	if err != nil {
+		t.Fatalf("Validate error: %v", err)
+	}
+	if claims.Subject != "svc-test" {
+		t.Errorf("expected subject svc-test, got %q", claims.Subject)
+	}
+}

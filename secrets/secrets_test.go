@@ -86,3 +86,41 @@ func TestChain_AllFail(t *testing.T) {
 		t.Errorf("expected ErrSecretNotFound, got %v", err)
 	}
 }
+
+func TestEnvProvider_TrimWhitespace(t *testing.T) {
+	t.Setenv("TRIM_TEST_KEY", "  secret-with-spaces  \n")
+
+	p := NewEnvProvider("TRIM_TEST_")
+	val, err := p.GetSecret(context.Background(), "KEY")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if val != "secret-with-spaces" {
+		t.Errorf("expected trimmed value, got %q", val)
+	}
+}
+
+func TestFileProvider_ReadError(t *testing.T) {
+	// Create a directory where a file is expected — os.ReadFile on a dir returns error.
+	dir := t.TempDir()
+	subdir := filepath.Join(dir, "not-a-file")
+	os.Mkdir(subdir, 0o755)
+
+	p := NewFileProvider(dir)
+	_, err := p.GetSecret(context.Background(), "not-a-file")
+	if err == nil {
+		t.Fatal("expected error reading directory as file")
+	}
+	// Should not be ErrSecretNotFound since the path exists but isn't readable as a file
+	if errors.Is(err, m2mauth.ErrSecretNotFound) {
+		t.Error("expected non-NotFound error for directory read")
+	}
+}
+
+func TestStaticProvider_NotFound(t *testing.T) {
+	p := NewStaticProvider(map[string]string{"a": "1"})
+	_, err := p.GetSecret(context.Background(), "b")
+	if !errors.Is(err, m2mauth.ErrSecretNotFound) {
+		t.Errorf("expected ErrSecretNotFound, got %v", err)
+	}
+}

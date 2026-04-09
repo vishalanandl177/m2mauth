@@ -30,7 +30,7 @@ func (p *EnvProvider) GetSecret(_ context.Context, key string) (string, error) {
 	if val == "" {
 		return "", fmt.Errorf("%w: env var %q not set", m2mauth.ErrSecretNotFound, envKey)
 	}
-	return val, nil
+	return strings.TrimSpace(val), nil
 }
 
 // FileProvider reads secrets from files, one secret per file.

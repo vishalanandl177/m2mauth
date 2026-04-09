@@ -122,6 +122,13 @@ func New(tokenURL, clientID string, opts ...Option) (*Client, error) {
 	if cfg.TokenURL == "" {
 		return nil, fmt.Errorf("m2mauth/oauth2: token URL is required")
 	}
+	parsed, err := url.Parse(cfg.TokenURL)
+	if err != nil {
+		return nil, fmt.Errorf("m2mauth/oauth2: invalid token URL: %w", err)
+	}
+	if parsed.Scheme != "https" && !strings.HasPrefix(parsed.Host, "localhost") && !strings.HasPrefix(parsed.Host, "127.0.0.1") {
+		return nil, fmt.Errorf("m2mauth/oauth2: token URL must use HTTPS")
+	}
 	if cfg.ClientID == "" {
 		return nil, fmt.Errorf("m2mauth/oauth2: client ID is required")
 	}
@@ -236,7 +243,7 @@ func (c *Client) doTokenRequest(ctx context.Context, secret string) (*m2mauth.To
 		return nil, &m2mauth.AuthError{
 			Op:        "token_fetch",
 			Kind:      "response",
-			Err:       fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body)),
+			Err:       fmt.Errorf("token endpoint returned HTTP %d", resp.StatusCode),
 			Retryable: retryable,
 		}
 	}

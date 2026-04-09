@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/vishalanandl177/m2mauth"
@@ -114,6 +115,20 @@ func TestFileProvider_ReadError(t *testing.T) {
 	// Should not be ErrSecretNotFound since the path exists but isn't readable as a file
 	if errors.Is(err, m2mauth.ErrSecretNotFound) {
 		t.Error("expected non-NotFound error for directory read")
+	}
+}
+
+func TestFileProvider_PathTraversal(t *testing.T) {
+	dir := t.TempDir()
+	p := NewFileProvider(dir)
+
+	// Attempt path traversal
+	_, err := p.GetSecret(context.Background(), "../../etc/passwd")
+	if err == nil {
+		t.Fatal("expected error for path traversal")
+	}
+	if !strings.Contains(err.Error(), "path traversal") {
+		t.Errorf("expected path traversal error, got: %v", err)
 	}
 }
 

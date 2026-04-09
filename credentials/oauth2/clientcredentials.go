@@ -233,7 +233,8 @@ func (c *Client) doTokenRequest(ctx context.Context, secret string) (*m2mauth.To
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	// Limit response body to 1MB to prevent resource exhaustion.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
 	if err != nil {
 		return nil, &m2mauth.AuthError{Op: "token_fetch", Kind: "network", Err: err, Retryable: true}
 	}
@@ -256,6 +257,10 @@ func (c *Client) doTokenRequest(ctx context.Context, secret string) (*m2mauth.To
 	}
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
 		return nil, &m2mauth.AuthError{Op: "token_fetch", Kind: "decode", Err: err, Retryable: false}
+	}
+	if tokenResp.AccessToken == "" {
+		return nil, &m2mauth.AuthError{Op: "token_fetch", Kind: "validation",
+			Err: fmt.Errorf("token server returned empty access_token"), Retryable: false}
 	}
 
 	var scopes []string

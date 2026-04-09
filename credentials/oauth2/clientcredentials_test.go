@@ -297,6 +297,24 @@ func TestClient_TokenBadJSON(t *testing.T) {
 	}
 }
 
+func TestClient_EmptyAccessToken(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"access_token":"","token_type":"Bearer","expires_in":3600}`))
+	}))
+	defer srv.Close()
+
+	client, err := New(srv.URL, "test-client", WithClientSecret("secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = client.Token(context.Background())
+	if err == nil {
+		t.Fatal("expected error for empty access_token")
+	}
+}
+
 func TestClient_SecretProviderError(t *testing.T) {
 	srv := testutil.NewMockTokenServer(3600, "read")
 	defer srv.Close()

@@ -828,6 +828,15 @@ func TestJWKS_BadRSABase64(t *testing.T) {
 	}
 }
 
+func TestJWKS_RSABadExponent(t *testing.T) {
+	// Exponent of 0 should be rejected
+	jwk := jwkKey{Kty: "RSA", N: "AAAA", E: base64.RawURLEncoding.EncodeToString([]byte{0})}
+	_, err := jwk.toRSAPublicKey()
+	if err == nil {
+		t.Fatal("expected error for zero exponent")
+	}
+}
+
 func TestJWKS_AlgorithmMismatch(t *testing.T) {
 	// Create JWKS server with RSA key that has alg: "RS256"
 	key, err := rsa.GenerateKey(rand.Reader, 2048)

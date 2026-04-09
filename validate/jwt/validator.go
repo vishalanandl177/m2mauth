@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"math/big"
 	"net/http"
 	"net/url"
@@ -475,7 +477,9 @@ func (c *jwksCache) refresh(ctx context.Context) error {
 	var jwksResp struct {
 		Keys []jwkKey `json:"keys"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&jwksResp); err != nil {
+	// Limit response body to 10MB to prevent resource exhaustion.
+	limitedBody := io.LimitReader(resp.Body, 10*1024*1024)
+	if err := json.NewDecoder(limitedBody).Decode(&jwksResp); err != nil {
 		return fmt.Errorf("decode JWKS: %w", err)
 	}
 
@@ -528,6 +532,11 @@ func (k *jwkKey) toRSAPublicKey() (*rsa.PublicKey, error) {
 
 	n := new(big.Int).SetBytes(nBytes)
 	e := new(big.Int).SetBytes(eBytes)
+
+	// Validate exponent is a safe positive integer (prevents truncation attacks).
+	if e.Sign() <= 0 || !e.IsInt64() || e.Int64() > math.MaxInt32 {
+		return nil, fmt.Errorf("invalid RSA exponent")
+	}
 
 	return &rsa.PublicKey{
 		N: n,

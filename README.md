@@ -20,6 +20,255 @@ Zero external dependencies. Works with `net/http` out of the box. Framework adap
 | **Retry with backoff** | `retry` | Infrastructure |
 | **Observability** | `authlog` | Infrastructure |
 
+## How It Works
+
+### OAuth 2.0 Client Credentials Flow
+
+Service A authenticates to Service B using a token from the authorization server. Tokens are cached and auto-refreshed.
+
+```
+┌─────────────┐                    ┌─────────────┐                    ┌─────────────┐
+│  Service A  │                    │  Auth Server │                    │  Service B  │
+│  (client)   │                    │  (OAuth 2.0) │                    │  (resource) │
+└──────┬──────┘                    └──────┬───────┘                    └──────┬──────┘
+       │                                  │                                   │
+       │  1. POST /oauth/token            │                                   │
+       │  (client_id + client_secret)     │                                   │
+       │─────────────────────────────────>│                                   │
+       │                                  │                                   │
+       │  2. { access_token, expires_in } │                                   │
+       │<─────────────────────────────────│                                   │
+       │                                  │                                   │
+       │         ┌──────────────────────┐ │                                   │
+       │         │ Token Cache          │ │                                   │
+       │         │ - Thread-safe        │ │                                   │
+       │         │ - Auto-refresh       │ │                                   │
+       │         │ - Expiry buffer (30s)│ │                                   │
+       │         └──────────────────────┘ │                                   │
+       │                                                                      │
+       │  3. GET /api/data                                                    │
+       │  Authorization: Bearer <token>                                       │
+       │─────────────────────────────────────────────────────────────────────>│
+       │                                                                      │
+       │  4. 200 OK { data }                                                  │
+       │<─────────────────────────────────────────────────────────────────────│
+       │                                                                      │
+
+  m2mauth packages used:
+  ├── credentials/oauth2  ── Handles steps 1-2 (token fetch + cache)
+  ├── middleware           ── RoundTripper injects Bearer token (step 3)
+  └── retry               ── Retries token fetch on transient failures
+```
+
+### JWT Validation Flow
+
+The server validates incoming JWTs by fetching public keys from the JWKS endpoint. Keys are cached and periodically refreshed.
+
+```
+┌─────────────┐                    ┌─────────────┐                    ┌─────────────┐
+│  Caller     │                    │  Your Server │                    │  Auth Server │
+│  (client)   │                    │  (validator) │                    │  (JWKS)      │
+└──────┬──────┘                    └──────┬───────┘                    └──────┬───────┘
+       │                                  │                                   │
+       │                                  │  1. GET /.well-known/jwks.json    │
+       │                                  │  (fetched once, cached 1h)        │
+       │                                  │──────────────────────────────────>│
+       │                                  │                                   │
+       │                                  │  2. { keys: [{ kid, n, e }] }     │
+       │                                  │<──────────────────────────────────│
+       │                                  │                                   │
+       │                                  │  ┌──────────────────────────────┐ │
+       │                                  │  │ JWKS Cache                   │ │
+       │                                  │  │ - Auto-refresh (1h default)  │ │
+       │                                  │  │ - Stale key fallback         │ │
+       │                                  │  │ - Refresh debounce (5s)      │ │
+       │                                  │  └──────────────────────────────┘ │
+       │                                  │                                   │
+       │  3. GET /api/data                │                                   │
+       │  Authorization: Bearer <JWT>     │                                   │
+       │─────────────────────────────────>│                                   │
+       │                                  │                                   │
+       │                           4. Validate JWT:                           │
+       │                           ├── Decode header + payload                │
+       │                           ├── Check algorithm allowlist              │
+       │                           ├── Verify signature (RSA/ECDSA)           │
+       │                           ├── Check exp, nbf, clock skew             │
+       │                           ├── Validate issuer + audience             │
+       │                           ├── Enforce required scopes                │
+       │                           └── Extract claims -> context              │
+       │                                  │                                   │
+       │  5. 200 OK { data }              │                                   │
+       │<─────────────────────────────────│                                   │
+       │                                  │                                   │
+
+  m2mauth packages used:
+  ├── validate/jwt  ── JWKS fetch, signature verify, claims validation
+  ├── middleware     ── RequireAuth wraps net/http handlers
+  └── contrib/ginauth ── RequireAuth wraps Gin handlers
+```
+
+### Mutual TLS (mTLS) Flow
+
+Both client and server present certificates. The server verifies the client's certificate against a trusted CA and extracts identity from the cert fields.
+
+```
+┌─────────────┐                                              ┌─────────────┐
+│  Service A  │                                              │  Service B  │
+│  (client)   │                                              │  (server)   │
+└──────┬──────┘                                              └──────┬──────┘
+       │                                                            │
+       │  1. TLS Handshake (ClientHello)                            │
+       │───────────────────────────────────────────────────────────>│
+       │                                                            │
+       │  2. ServerHello + Server Certificate                       │
+       │     + CertificateRequest (asks for client cert)            │
+       │<───────────────────────────────────────────────────────────│
+       │                                                            │
+       │  3. Client Certificate + ClientKeyExchange                 │
+       │  ┌─────────────────────────────────┐                       │
+       │  │ credentials/mtls Transport      │                       │
+       │  │ - Loads cert from file or PEM   │                       │
+       │  │ - Hot-reload via rotation loop  │                       │
+       │  │ - Polls every N minutes         │                       │
+       │  │ - Validates cert not expired    │                       │
+       │  └─────────────────────────────────┘                       │
+       │───────────────────────────────────────────────────────────>│
+       │                                                            │
+       │                                      4. Server validates:  │
+       │                                      ┌────────────────────┐│
+       │                                      │ validate/mtls      ││
+       │                                      │ - Verify against CA││
+       │                                      │ - Check NotBefore/ ││
+       │                                      │   NotAfter (expiry)││
+       │                                      │ - Enforce CN match ││
+       │                                      │ - Enforce OU match ││
+       │                                      │ - Extract claims:  ││
+       │                                      │   subject, issuer, ││
+       │                                      │   serial, OU, SANs ││
+       │                                      └────────────────────┘│
+       │                                                            │
+       │  5. TLS Established (mutual authentication)                │
+       │<──────────────────────────────────────────────────────────>│
+       │                                                            │
+       │  6. GET /api/data (over mTLS connection)                   │
+       │───────────────────────────────────────────────────────────>│
+       │                                                            │
+       │  7. 200 OK { data }                                        │
+       │<───────────────────────────────────────────────────────────│
+       │                                                            │
+
+  m2mauth packages used:
+  Client side:                        Server side:
+  ├── credentials/mtls  ── Cert       ├── validate/mtls   ── Cert verification
+  │   loading + rotation              ├── middleware        ── RequireAuth
+  └── authlog ── Rotation events      └── contrib/ginauth  ── Gin middleware
+```
+
+### mTLS Certificate Rotation
+
+The client-side transport automatically reloads certificates from disk without downtime.
+
+```
+                        ┌─────────────────────────────────────┐
+                        │         credentials/mtls             │
+                        │         Transport                    │
+  ┌──────────┐          │                                     │
+  │ cert.pem │─── Load ─┤  ┌───────────┐   ┌──────────────┐  │
+  │ key.pem  │          │  │ Current   │   │  Rotation    │  │
+  └──────────┘          │  │ TLS Cert  │   │  Loop        │  │
+       │                │  │ (RWMutex) │   │              │  │
+       │                │  └───────────┘   │  every 5min: │  │
+  Cert issuer           │       ^          │  1. Load new │  │
+  rotates files         │       │          │  2. Validate │  │
+  on disk               │       └──────────│  3. Swap     │  │
+       │                │                  │  4. Log event│  │
+       v                │                  └──────────────┘  │
+  ┌──────────┐          │                                     │
+  │ cert.pem │─── Reload┤  GetClientCertificate() callback    │
+  │ key.pem  │  (new)   │  returns current cert for every     │
+  └──────────┘          │  TLS handshake (no restart needed)  │
+                        └─────────────────────────────────────┘
+```
+
+### API Key Flow
+
+Simple header-based authentication. The server looks up the key and returns pre-configured claims.
+
+```
+┌─────────────┐                    ┌─────────────────────────────────────────┐
+│  Caller     │                    │  Your Server                            │
+│  (client)   │                    │                                         │
+└──────┬──────┘                    │  ┌──────────────┐   ┌────────────────┐  │
+       │                           │  │ validate/    │   │ KeyStore       │  │
+       │  1. GET /api/data         │  │ apikey       │   │ (MapStore or   │  │
+       │  X-API-Key: sk_live_xxx   │  │ Validator    │   │  custom impl)  │  │
+       │──────────────────────────>│  └──────┬───────┘   └───────┬────────┘  │
+       │                           │         │                   │           │
+       │                           │  2. Extract key from header │           │
+       │                           │         │                   │           │
+       │                           │  3. Lookup(key) ───────────>│           │
+       │                           │         │  (constant-time   │           │
+       │                           │         │   comparison)     │           │
+       │                           │         │                   │           │
+       │                           │  4. Claims { subject,  <────│           │
+       │                           │           scopes }          │           │
+       │                           │         │                   │           │
+       │                           │  5. Store claims in context │           │
+       │                           │         │                                │
+       │  6. 200 OK { data }       │         v                                │
+       │<──────────────────────────│  Handler: claims.HasScope("read:data")  │
+       │                           │                                         │
+       └                           └─────────────────────────────────────────┘
+
+  Outbound (client side):            Inbound (server side):
+  ├── credentials/apikey             ├── validate/apikey ── Constant-time lookup
+  │   - Header: X-API-Key           ├── middleware       ── RequireAuth
+  │   - Bearer: Authorization       └── contrib/ginauth  ── Gin middleware
+  │   - Query: ?api_key=xxx
+  └── secrets ── Dynamic key from env/file/vault
+```
+
+### Combined: Inbound JWT + Outbound OAuth2 (Gateway Pattern)
+
+A common microservices pattern where a gateway validates incoming requests and authenticates outbound calls to downstream services.
+
+```
+┌──────────┐          ┌───────────────────────────────┐          ┌────────────┐
+│  Client  │          │  API Gateway (Gin)            │          │ Downstream │
+│          │          │                               │          │ Service    │
+└────┬─────┘          │  ┌─────────┐  ┌────────────┐ │          └─────┬──────┘
+     │                │  │validate/│  │credentials/│ │                │
+     │ 1. Request     │  │jwt      │  │oauth2      │ │                │
+     │ + Bearer JWT   │  │         │  │            │ │                │
+     │───────────────>│  └────┬────┘  └─────┬──────┘ │                │
+     │                │       │             │        │                │
+     │                │  2. Validate        │        │                │
+     │                │  inbound JWT        │        │                │
+     │                │       │             │        │                │
+     │                │  3. Extract         │        │                │
+     │                │  caller claims      │        │                │
+     │                │       │             │        │                │
+     │                │       │  4. Get     │        │                │
+     │                │       │  outbound   │        │                │
+     │                │       │  token      │        │                │
+     │                │       │  (cached)   │        │                │
+     │                │       │             │        │                │
+     │                │       └─────────────┘        │                │
+     │                │              │               │                │
+     │                │  5. Forward request           │                │
+     │                │  + Bearer <outbound token>    │                │
+     │                │──────────────────────────────────────────────>│
+     │                │                               │                │
+     │                │  6. Response                   │                │
+     │                │<──────────────────────────────────────────────│
+     │  7. Response   │                               │                │
+     │<───────────────│                               │                │
+     │                │                               │                │
+     └                └───────────────────────────────┘                │
+
+  See: _examples/gin_oauth2_client
+```
+
 ## Install
 
 ```bash

@@ -1,4 +1,9 @@
 // Package mtls provides server-side mTLS client certificate verification.
+//
+// Includes built-in SPIFFE support: if a client certificate has a
+// spiffe:// URI SAN, it is extracted and can be enforced via
+// WithTrustDomain or WithAllowedSPIFFEIDs. For live SPIRE Workload
+// API integration, see contrib/spiffe.
 package mtls
 
 import (
@@ -6,6 +11,7 @@ import (
 	"crypto/x509"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -24,6 +30,16 @@ type Config struct {
 
 	// RequiredCN limits access to certificates matching a specific Common Name pattern.
 	RequiredCN string
+
+	// TrustDomain, if set, requires the peer certificate to carry a SPIFFE ID
+	// (spiffe:// URI SAN) belonging to this trust domain.
+	// Example: "prod.acme.com"
+	TrustDomain string
+
+	// AllowedSPIFFEIDs, if non-empty, restricts access to certificates whose
+	// SPIFFE ID exactly matches one of the entries.
+	// Example: []string{"spiffe://prod.acme.com/ns/default/sa/orders"}
+	AllowedSPIFFEIDs []string
 
 	// EventHandler receives auth events.
 	EventHandler authlog.EventHandler
@@ -45,6 +61,18 @@ func WithRequiredOU(ou string) Option {
 
 func WithRequiredCN(cn string) Option {
 	return func(c *Config) { c.RequiredCN = cn }
+}
+
+// WithTrustDomain requires the peer certificate to carry a SPIFFE ID
+// belonging to the given trust domain (e.g., "prod.acme.com").
+func WithTrustDomain(domain string) Option {
+	return func(c *Config) { c.TrustDomain = domain }
+}
+
+// WithAllowedSPIFFEIDs restricts access to a specific list of SPIFFE IDs.
+// Example: WithAllowedSPIFFEIDs("spiffe://prod.acme.com/ns/default/sa/orders")
+func WithAllowedSPIFFEIDs(ids ...string) Option {
+	return func(c *Config) { c.AllowedSPIFFEIDs = ids }
 }
 
 func WithEventHandler(h authlog.EventHandler) Option {
@@ -107,6 +135,8 @@ func (v *Verifier) Validate(ctx context.Context, req *http.Request) (*m2mauth.Cl
 
 	// Check CN constraint.
 	if v.cfg.RequiredCN != "" && cert.Subject.CommonName != v.cfg.RequiredCN {
+		authlog.Emit(ctx, v.cfg.EventHandler, authlog.EventAuthFailure, v.cfg.ServiceName,
+			map[string]string{"reason": "cn_mismatch", "cn": cert.Subject.CommonName}, 0, nil)
 		return nil, &m2mauth.AuthError{
 			Op:   "mtls_validate",
 			Kind: "validation",
@@ -124,6 +154,8 @@ func (v *Verifier) Validate(ctx context.Context, req *http.Request) (*m2mauth.Cl
 			}
 		}
 		if !found {
+			authlog.Emit(ctx, v.cfg.EventHandler, authlog.EventAuthFailure, v.cfg.ServiceName,
+				map[string]string{"reason": "ou_mismatch", "cn": cert.Subject.CommonName}, 0, nil)
 			return nil, &m2mauth.AuthError{
 				Op:   "mtls_validate",
 				Kind: "validation",
@@ -132,19 +164,111 @@ func (v *Verifier) Validate(ctx context.Context, req *http.Request) (*m2mauth.Cl
 		}
 	}
 
+	// Extract SPIFFE ID from URI SANs (if present).
+	spiffeID, spiffeErr := extractSPIFFEID(cert.URIs)
+
+	// Enforce trust domain if configured — requires a SPIFFE ID to be present.
+	if v.cfg.TrustDomain != "" {
+		if spiffeErr != nil {
+			authlog.Emit(ctx, v.cfg.EventHandler, authlog.EventAuthFailure, v.cfg.ServiceName,
+				map[string]string{"reason": "spiffe_id_missing"}, 0, spiffeErr)
+			return nil, m2mauth.ErrInvalidSPIFFEID
+		}
+		if spiffeTrustDomain(spiffeID) != v.cfg.TrustDomain {
+			authlog.Emit(ctx, v.cfg.EventHandler, authlog.EventAuthFailure, v.cfg.ServiceName,
+				map[string]string{"reason": "wrong_trust_domain", "spiffe_id": spiffeID}, 0, nil)
+			return nil, m2mauth.ErrWrongTrustDomain
+		}
+	}
+
+	// Enforce SPIFFE ID allowlist if configured.
+	if len(v.cfg.AllowedSPIFFEIDs) > 0 {
+		if spiffeErr != nil {
+			authlog.Emit(ctx, v.cfg.EventHandler, authlog.EventAuthFailure, v.cfg.ServiceName,
+				map[string]string{"reason": "spiffe_id_missing"}, 0, spiffeErr)
+			return nil, m2mauth.ErrInvalidSPIFFEID
+		}
+		allowed := false
+		for _, id := range v.cfg.AllowedSPIFFEIDs {
+			if id == spiffeID {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			authlog.Emit(ctx, v.cfg.EventHandler, authlog.EventAuthFailure, v.cfg.ServiceName,
+				map[string]string{"reason": "spiffe_id_not_allowed", "spiffe_id": spiffeID}, 0, nil)
+			return nil, m2mauth.ErrSPIFFEIDNotAllowed
+		}
+	}
+
+	// Choose subject: prefer SPIFFE ID if present, fall back to CN.
+	subject := cert.Subject.CommonName
+	if spiffeID != "" {
+		subject = spiffeID
+	}
+
+	extra := map[string]any{
+		"serial":  cert.SerialNumber.String(),
+		"ou":      strings.Join(cert.Subject.OrganizationalUnit, ","),
+		"dns_san": cert.DNSNames,
+		"cn":      cert.Subject.CommonName,
+	}
+	if spiffeID != "" {
+		extra["spiffe_id"] = spiffeID
+		extra["trust_domain"] = spiffeTrustDomain(spiffeID)
+	}
+
 	claims := &m2mauth.Claims{
-		Subject:   cert.Subject.CommonName,
+		Subject:   subject,
 		Issuer:    cert.Issuer.CommonName,
 		IssuedAt:  cert.NotBefore,
 		ExpiresAt: cert.NotAfter,
-		Extra: map[string]any{
-			"serial":  cert.SerialNumber.String(),
-			"ou":      strings.Join(cert.Subject.OrganizationalUnit, ","),
-			"dns_san": cert.DNSNames,
-		},
+		Extra:     extra,
 	}
 
 	authlog.Emit(ctx, v.cfg.EventHandler, authlog.EventAuthSuccess, v.cfg.ServiceName,
 		map[string]string{"subject": claims.Subject}, 0, nil)
 	return claims, nil
+}
+
+// extractSPIFFEID returns the SPIFFE ID (spiffe://trust-domain/path) from
+// a certificate's URI SANs. Per SPIFFE spec, certificates should contain
+// exactly one SPIFFE URI SAN. Returns an error if none is found or multiple
+// are present.
+func extractSPIFFEID(uris []*url.URL) (string, error) {
+	var found string
+	for _, u := range uris {
+		if u == nil {
+			continue
+		}
+		if u.Scheme != "spiffe" {
+			continue
+		}
+		if found != "" {
+			return "", fmt.Errorf("certificate contains multiple SPIFFE IDs")
+		}
+		// Validate SPIFFE URI structure: must have a non-empty host (trust domain).
+		if u.Host == "" {
+			return "", fmt.Errorf("SPIFFE ID missing trust domain")
+		}
+		// SPIFFE IDs must not have userinfo, query, or fragment.
+		if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+			return "", fmt.Errorf("SPIFFE ID has forbidden URI components")
+		}
+		found = u.String()
+	}
+	if found == "" {
+		return "", fmt.Errorf("no SPIFFE ID found in URI SANs")
+	}
+	return found, nil
+}
+
+// spiffeTrustDomain extracts the trust domain (host) from a SPIFFE ID string.
+func spiffeTrustDomain(spiffeID string) string {
+	u, err := url.Parse(spiffeID)
+	if err != nil {
+		return ""
+	}
+	return u.Host
 }

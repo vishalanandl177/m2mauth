@@ -35,6 +35,23 @@ This installs the OTel event handler. After installing, you need to:
 
 Just installing the package does **not** automatically enable tracing or metrics. See the [OpenTelemetry setup guide](#opentelemetry-tracing-and-metrics) below.
 
+### SPIFFE/SPIRE integration (optional)
+
+```bash
+go get github.com/vishalanandl177/m2mauth/contrib/spiffe
+```
+
+This installs the SPIFFE-aware mTLS verifier backed by the SPIRE Workload API. After installing, you need to:
+
+1. **Have a SPIRE agent running** with your workload registered
+2. **Connect to the Workload API** via `workloadapi.NewX509Source(ctx)`
+3. **Create a `spiffeauth.NewVerifier(source, ...)`** with a trust domain or SPIFFE ID allowlist
+4. **Pass it to `middleware.RequireAuth()`** like any other validator
+
+See the [SPIFFE/SPIRE setup guide](#spiffespire-workload-authentication) below.
+
+Note: For basic SPIFFE ID validation on pre-issued certificates (no live SPIRE agent needed), the core `validate/mtls` package now supports `WithTrustDomain()` and `WithAllowedSPIFFEIDs()` out of the box — see [below](#spiffe-id-validation-without-spire).
+
 ## Features
 
 | Feature | Package | Direction |
@@ -48,6 +65,7 @@ Just installing the package does **not** automatically enable tracing or metrics
 | **HTTP middleware** | `middleware` | Both |
 | **Gin framework adapter** | `contrib/ginauth` | Inbound |
 | **OpenTelemetry integration** | `contrib/otel` | Observability |
+| **SPIFFE/SPIRE (Workload API)** | `contrib/spiffe` | Inbound |
 | **Secret management** | `secrets` | Infrastructure |
 | **Retry with backoff** | `retry` | Infrastructure |
 | **Structured logging (slog)** | `authlog` | Observability |
@@ -570,6 +588,116 @@ handler := authlog.NewMultiHandler(
 )
 ```
 
+## SPIFFE/SPIRE Workload Authentication
+
+m2mauth supports [SPIFFE](https://spiffe.io) identities at two levels:
+
+### SPIFFE ID validation (without SPIRE)
+
+The core `validate/mtls` package parses `spiffe://` URI SANs from client certificates and can enforce a trust domain or explicit SPIFFE ID allowlist — no SPIRE agent required. Use this when certs are issued by your existing PKI but include SPIFFE IDs.
+
+```go
+import vmtls "github.com/vishalanandl177/m2mauth/validate/mtls"
+
+verifier := vmtls.New(
+    vmtls.WithTrustedCAs(caPool),
+
+    // Option 1: accept any workload in the trust domain
+    vmtls.WithTrustDomain("prod.acme.com"),
+
+    // Option 2: restrict to specific SPIFFE IDs
+    vmtls.WithAllowedSPIFFEIDs(
+        "spiffe://prod.acme.com/ns/default/sa/orders",
+        "spiffe://prod.acme.com/ns/default/sa/payments",
+    ),
+)
+```
+
+When a SPIFFE ID is present, `claims.Subject` is set to the SPIFFE ID string. The CN, OU, DNS SANs, trust domain, and serial are all exposed in `claims.Extra`.
+
+**What the core verifier validates when a SPIFFE URI is present:**
+
+- Exactly one `spiffe://` URI SAN (multiple are rejected per SPEC)
+- Trust domain (URI host) is non-empty
+- No userinfo, query, or fragment components
+- If `WithTrustDomain` is set: URI host matches configured domain
+- If `WithAllowedSPIFFEIDs` is set: full ID is in the allowlist
+
+### Live SPIRE Workload API integration (`contrib/spiffe`)
+
+For production SPIFFE deployments with a running SPIRE agent, use `contrib/spiffe`. This fetches X.509 SVIDs and trust bundles live from the SPIRE agent's Unix socket — no manual CA management, automatic rotation.
+
+**Step 1 — Install and connect to SPIRE:**
+
+```go
+import (
+    "github.com/spiffe/go-spiffe/v2/workloadapi"
+    spiffeauth "github.com/vishalanandl177/m2mauth/contrib/spiffe"
+)
+
+// Connect to SPIRE agent (default: /tmp/spire-agent/public/api.sock)
+source, err := workloadapi.NewX509Source(ctx)
+if err != nil {
+    log.Fatal(err)
+}
+defer source.Close()
+```
+
+**Step 2 — Create a SPIFFE verifier:**
+
+```go
+// Allow any workload in the trust domain
+verifier, err := spiffeauth.NewVerifier(source,
+    spiffeauth.WithTrustDomain("prod.acme.com"),
+)
+
+// Or restrict to specific workloads
+verifier, err := spiffeauth.NewVerifier(source,
+    spiffeauth.WithAllowedIDs(
+        "spiffe://prod.acme.com/ns/default/sa/orders",
+    ),
+)
+
+// Or provide a custom authorizer
+verifier, err := spiffeauth.NewVerifier(source,
+    spiffeauth.WithAuthorizer(func(id spiffeid.ID) error {
+        if !strings.HasPrefix(id.Path(), "/team-a/") {
+            return errors.New("only team-a allowed")
+        }
+        return nil
+    }),
+)
+```
+
+**Step 3 — Wire it into your HTTP server:**
+
+```go
+// Use with net/http
+mux.Handle("/api/data", middleware.RequireAuth(verifier)(handler))
+
+// Or with Gin
+r.Use(ginauth.RequireAuth(verifier))
+
+// Configure TLS to use SPIFFE SVIDs on the server side too
+tlsCfg := tlsconfig.MTLSServerConfig(source, source, tlsconfig.AuthorizeAny())
+server := &http.Server{Addr: ":8443", Handler: mux, TLSConfig: tlsCfg}
+server.ListenAndServeTLS("", "")
+```
+
+**Why use `contrib/spiffe` over the core verifier:**
+
+| Feature | `validate/mtls` | `contrib/spiffe` |
+|---------|----------------|-----------------|
+| SPIFFE ID parsing | Yes | Yes |
+| Trust domain enforcement | Yes | Yes |
+| Uses stdlib only | Yes (zero deps) | Requires go-spiffe |
+| Live trust bundle updates | No (static CA pool) | Yes (from SPIRE agent) |
+| Live SVID rotation | No | Yes |
+| Works without SPIRE | Yes | No |
+| Workload API integration | No | Yes |
+
+Full example: [`_examples/spiffe_server/main.go`](_examples/spiffe_server/main.go)
+
 ## Framework and Integration Support
 
 | Integration | Package | Install | Auto-enabled? |
@@ -577,9 +705,10 @@ handler := authlog.NewMultiHandler(
 | `net/http` | `middleware` | Included | Yes -- works out of the box |
 | **Gin** | `contrib/ginauth` | `go get .../contrib/ginauth` | No -- wire into router with `ginauth.RequireAuth(v)` |
 | **OpenTelemetry** | `contrib/otel` | `go get .../contrib/otel` | No -- create handler + pass via `WithEventHandler()` |
+| **SPIFFE/SPIRE** | `contrib/spiffe` | `go get .../contrib/spiffe` | No -- connect to Workload API + create verifier |
 | **slog** | `authlog` | Included | No -- create `NewSlogHandler(logger)` + pass via `WithEventHandler()` |
 
-The `contrib/` adapters are separate Go modules so the core library stays zero-dependency. The Gin adapter works with any `m2mauth.Validator` (JWT, API Key, mTLS). The OTel adapter works with any component that accepts `WithEventHandler()`.
+The `contrib/` adapters are separate Go modules so the core library stays zero-dependency. The Gin adapter works with any `m2mauth.Validator` (JWT, API Key, mTLS). The OTel adapter works with any component that accepts `WithEventHandler()`. The SPIFFE adapter uses the SPIRE Workload API for live trust material.
 
 ## Architecture
 
@@ -590,10 +719,11 @@ m2mauth (core interfaces, zero deps)
   ├── credentials/apikey  -> API key injection
   ├── validate/jwt        -> JWT + JWKS validation
   ├── validate/apikey     -> API key lookup
-  ├── validate/mtls       -> Client cert verification
+  ├── validate/mtls       -> Client cert verification + SPIFFE ID parsing
   ├── middleware           -> http.RoundTripper + net/http middleware
   ├── contrib/ginauth     -> Gin framework adapter (separate module)
   ├── contrib/otel        -> OpenTelemetry traces + metrics (separate module)
+  ├── contrib/spiffe      -> SPIFFE/SPIRE Workload API (separate module)
   ├── secrets             -> Env, File, Static, Chain providers
   ├── retry               -> Exponential backoff with jitter
   └── authlog             -> Structured events, slog logging, MultiHandler
@@ -692,6 +822,7 @@ A pre-commit hook validates build, formatting, static analysis, tests, coverage,
 | Gin mTLS Server | `_examples/gin_mtls_server` | Gin with mTLS client cert verification |
 | Gin API Key Server | `_examples/gin_apikey_server` | Gin with API key auth and scope checks |
 | Gin OAuth2 Gateway | `_examples/gin_oauth2_client` | Gin with inbound JWT + outbound OAuth2 |
+| SPIFFE Server | `_examples/spiffe_server` | Live SPIRE Workload API + mTLS auth |
 
 ## Documentation
 

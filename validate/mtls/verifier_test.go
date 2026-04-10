@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -49,6 +50,7 @@ type certOpts struct {
 	cn       string
 	ou       []string
 	dns      []string
+	uris     []*url.URL
 	notAfter time.Time
 }
 
@@ -69,6 +71,7 @@ func signClientCert(t *testing.T, caCert *x509.Certificate, caKey *rsa.PrivateKe
 			OrganizationalUnit: opts.ou,
 		},
 		DNSNames:    opts.dns,
+		URIs:        opts.uris,
 		NotBefore:   time.Now().Add(-time.Minute),
 		NotAfter:    opts.notAfter,
 		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
@@ -83,6 +86,15 @@ func signClientCert(t *testing.T, caCert *x509.Certificate, caKey *rsa.PrivateKe
 		t.Fatal(err)
 	}
 	return cert
+}
+
+// helper: parse a SPIFFE ID string into a URL
+func spiffe(id string) *url.URL {
+	u, err := url.Parse(id)
+	if err != nil {
+		panic(err)
+	}
+	return u
 }
 
 // build an *http.Request with TLS peer certs attached
@@ -278,5 +290,163 @@ func TestVerifier_WithOptions(t *testing.T) {
 	}
 	if claims.Subject != "svc-test" {
 		t.Errorf("expected subject svc-test, got %q", claims.Subject)
+	}
+}
+
+// --- SPIFFE tests ---
+
+func TestVerifier_SPIFFE_IDExtracted(t *testing.T) {
+	caCert, caKey, pool := generateCA(t)
+	clientCert := signClientCert(t, caCert, caKey, certOpts{
+		cn:   "svc-orders",
+		uris: []*url.URL{spiffe("spiffe://prod.acme.com/ns/default/sa/orders")},
+	})
+
+	v := New(WithTrustedCAs(pool))
+	claims, err := v.Validate(context.Background(), reqWithCerts(clientCert))
+	if err != nil {
+		t.Fatalf("Validate error: %v", err)
+	}
+
+	wantSubject := "spiffe://prod.acme.com/ns/default/sa/orders"
+	if claims.Subject != wantSubject {
+		t.Errorf("expected subject %q, got %q", wantSubject, claims.Subject)
+	}
+	if claims.Extra["spiffe_id"] != wantSubject {
+		t.Errorf("expected spiffe_id in extra, got %v", claims.Extra["spiffe_id"])
+	}
+	if claims.Extra["trust_domain"] != "prod.acme.com" {
+		t.Errorf("expected trust_domain, got %v", claims.Extra["trust_domain"])
+	}
+	if claims.Extra["cn"] != "svc-orders" {
+		t.Errorf("expected cn in extra, got %v", claims.Extra["cn"])
+	}
+}
+
+func TestVerifier_SPIFFE_TrustDomainMatch(t *testing.T) {
+	caCert, caKey, pool := generateCA(t)
+	clientCert := signClientCert(t, caCert, caKey, certOpts{
+		cn:   "svc-test",
+		uris: []*url.URL{spiffe("spiffe://prod.acme.com/workload/orders")},
+	})
+
+	v := New(WithTrustedCAs(pool), WithTrustDomain("prod.acme.com"))
+	_, err := v.Validate(context.Background(), reqWithCerts(clientCert))
+	if err != nil {
+		t.Fatalf("Validate error: %v", err)
+	}
+}
+
+func TestVerifier_SPIFFE_TrustDomainMismatch(t *testing.T) {
+	caCert, caKey, pool := generateCA(t)
+	clientCert := signClientCert(t, caCert, caKey, certOpts{
+		cn:   "svc-test",
+		uris: []*url.URL{spiffe("spiffe://staging.acme.com/workload/orders")},
+	})
+
+	v := New(WithTrustedCAs(pool), WithTrustDomain("prod.acme.com"))
+	_, err := v.Validate(context.Background(), reqWithCerts(clientCert))
+	if err != m2mauth.ErrWrongTrustDomain {
+		t.Errorf("expected ErrWrongTrustDomain, got %v", err)
+	}
+}
+
+func TestVerifier_SPIFFE_TrustDomainRequiresSPIFFEID(t *testing.T) {
+	caCert, caKey, pool := generateCA(t)
+	clientCert := signClientCert(t, caCert, caKey, certOpts{cn: "svc-test"})
+
+	v := New(WithTrustedCAs(pool), WithTrustDomain("prod.acme.com"))
+	_, err := v.Validate(context.Background(), reqWithCerts(clientCert))
+	if err != m2mauth.ErrInvalidSPIFFEID {
+		t.Errorf("expected ErrInvalidSPIFFEID, got %v", err)
+	}
+}
+
+func TestVerifier_SPIFFE_IDAllowlistMatch(t *testing.T) {
+	caCert, caKey, pool := generateCA(t)
+	clientCert := signClientCert(t, caCert, caKey, certOpts{
+		cn:   "svc-test",
+		uris: []*url.URL{spiffe("spiffe://prod.acme.com/ns/default/sa/orders")},
+	})
+
+	v := New(
+		WithTrustedCAs(pool),
+		WithAllowedSPIFFEIDs(
+			"spiffe://prod.acme.com/ns/default/sa/orders",
+			"spiffe://prod.acme.com/ns/default/sa/payments",
+		),
+	)
+	claims, err := v.Validate(context.Background(), reqWithCerts(clientCert))
+	if err != nil {
+		t.Fatalf("Validate error: %v", err)
+	}
+	if claims.Subject != "spiffe://prod.acme.com/ns/default/sa/orders" {
+		t.Errorf("unexpected subject: %q", claims.Subject)
+	}
+}
+
+func TestVerifier_SPIFFE_IDAllowlistMismatch(t *testing.T) {
+	caCert, caKey, pool := generateCA(t)
+	clientCert := signClientCert(t, caCert, caKey, certOpts{
+		cn:   "svc-test",
+		uris: []*url.URL{spiffe("spiffe://prod.acme.com/ns/default/sa/unauthorized")},
+	})
+
+	v := New(
+		WithTrustedCAs(pool),
+		WithAllowedSPIFFEIDs("spiffe://prod.acme.com/ns/default/sa/orders"),
+	)
+	_, err := v.Validate(context.Background(), reqWithCerts(clientCert))
+	if err != m2mauth.ErrSPIFFEIDNotAllowed {
+		t.Errorf("expected ErrSPIFFEIDNotAllowed, got %v", err)
+	}
+}
+
+func TestVerifier_SPIFFE_MultipleIDsRejected(t *testing.T) {
+	caCert, caKey, pool := generateCA(t)
+	clientCert := signClientCert(t, caCert, caKey, certOpts{
+		cn: "svc-test",
+		uris: []*url.URL{
+			spiffe("spiffe://prod.acme.com/a"),
+			spiffe("spiffe://prod.acme.com/b"),
+		},
+	})
+
+	v := New(WithTrustedCAs(pool), WithTrustDomain("prod.acme.com"))
+	_, err := v.Validate(context.Background(), reqWithCerts(clientCert))
+	if err != m2mauth.ErrInvalidSPIFFEID {
+		t.Errorf("expected ErrInvalidSPIFFEID for multiple SPIFFE IDs, got %v", err)
+	}
+}
+
+func TestVerifier_SPIFFE_NoSPIFFEIDStillWorksWithoutEnforcement(t *testing.T) {
+	caCert, caKey, pool := generateCA(t)
+	clientCert := signClientCert(t, caCert, caKey, certOpts{cn: "svc-legacy"})
+
+	v := New(WithTrustedCAs(pool))
+	claims, err := v.Validate(context.Background(), reqWithCerts(clientCert))
+	if err != nil {
+		t.Fatalf("Validate error: %v", err)
+	}
+	if claims.Subject != "svc-legacy" {
+		t.Errorf("expected subject svc-legacy, got %q", claims.Subject)
+	}
+	if _, ok := claims.Extra["spiffe_id"]; ok {
+		t.Error("spiffe_id should not be in extra when no SPIFFE URI present")
+	}
+}
+
+func TestVerifier_SPIFFE_InvalidURIRejected(t *testing.T) {
+	caCert, caKey, pool := generateCA(t)
+	u, _ := url.Parse("spiffe:///missing-host")
+	clientCert := signClientCert(t, caCert, caKey, certOpts{
+		cn:   "svc-test",
+		uris: []*url.URL{u},
+	})
+
+	v := New(WithTrustedCAs(pool), WithTrustDomain("prod.acme.com"))
+	_, err := v.Validate(context.Background(), reqWithCerts(clientCert))
+	if err == nil {
+		t.Fatal("expected error for invalid SPIFFE URI")
 	}
 }
